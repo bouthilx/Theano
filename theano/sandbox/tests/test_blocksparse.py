@@ -234,7 +234,7 @@ class BlockSparse_Gemv_and_Outer(unittest.TestCase):
         assert h_g.shape == h_val.shape
         assert W_g.shape == W_val.shape
 
-    def test_sparse_block_outer(self):
+    def test_sparseblockouter(self):
         o = tensor.ftensor4()
         x = tensor.ftensor3()
         y = tensor.ftensor3()
