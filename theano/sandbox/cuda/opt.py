@@ -2292,6 +2292,8 @@ def local_inplace_blocksparse_outer(node):
 #    def local_merge_blocksparse_output(node, *inputs):
 #        return [gpu_sparse_block_outer(*inputs)]
 
+def _owner_isinstance(inp, test_class):
+    return bool(inp.owner) and isinstance(inp.owner.op, test_class)
 
 def _clear_host_from_gpu(inputs):
     """
@@ -2305,7 +2307,8 @@ def _clear_host_from_gpu(inputs):
             clean_inputs.append(inp)
     return clean_inputs
 
-@register_meta_opt(SparseBlockGemv, 48.55, 'fast_run', 'fast_compile', 'gpu')
+
+@register_meta_opt(SparseBlockGemv, ["gpu_opt", "gpu_local_optimizations"], 0., 'fast_run', 'fast_compile', 'gpu')
 @local_optimizer([SparseBlockGemv, GpuFromHost])
 def gpu_sparse_block_gemv_opt(node):
     """
@@ -2317,8 +2320,10 @@ def gpu_sparse_block_gemv_opt(node):
         inputs = _clear_host_from_gpu(node.inputs)
 
         if node.op.inplace:
+            print "inplace"
             return [host_from_gpu(gpu_sparse_block_gemv_inplace(*inputs))]
         else:
+            print "not inplace"
             return [host_from_gpu(gpu_sparse_block_gemv(*inputs))]
 
     elif isinstance(node.op, GpuFromHost) and \
@@ -2333,12 +2338,13 @@ def gpu_sparse_block_gemv_opt(node):
             return [gpu_sparse_block_gemv(*inputs)]
 
 
-@register_meta_opt(SparseBlockOuter, 48.55, 'fast_run', 'fast_compile', 'gpu')
+@register_meta_opt(SparseBlockOuter, ["gpu_opt", "gpu_local_optimizations"], 0., 'fast_run', 'fast_compile', 'gpu')
 @local_optimizer([SparseBlockOuter, GpuFromHost])
 def gpu_sparse_block_outer_opt(node):
     """
         TODO: WRITEME
     """
+
     if isinstance(node.op, SparseBlockOuter) and \
        any(_owner_isinstance(inp, HostFromGpu) for inp in node.inputs):
 
@@ -2359,6 +2365,7 @@ def gpu_sparse_block_outer_opt(node):
             return [gpu_sparse_block_outer_inplace(*inputs)]
         else:
             return [gpu_sparse_block_outer(*inputs)]
+
 
 
 import theano.sandbox.cuda.extra_ops
