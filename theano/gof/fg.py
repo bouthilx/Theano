@@ -1,10 +1,9 @@
-
 """
 fg.py: fg stands for FunctionGraph
 Contains the FunctionGraph class and exception
 types that it can raise
 """
-import StringIO
+from __future__ import print_function
 import sys
 import time
 import traceback
@@ -14,12 +13,14 @@ from theano.gof import graph
 from theano.gof import utils
 from theano.gof import toolbox
 from theano import config
-import warnings
 
 from theano.compat import OrderedDict
+from six import iteritems, itervalues
+from six.moves import StringIO
 from theano.misc.ordered_set import OrderedSet
 
 NullType = None
+
 
 class CachedConstantError(Exception):
     """An exception thrown when we put in a FunctionGraph a Constant
@@ -112,7 +113,9 @@ class FunctionGraph(utils.object2):
         # outputs are cached in this field
         self.apply_nodes = set()
 
-        # Ditto for variable nodes
+        # Ditto for variable nodes.
+        # It must contain all fgraph.inputs and all apply_nodes
+        # outputs even if they aren't used in the graph.
         self.variables = set()
 
         self.inputs = list(inputs)
@@ -131,7 +134,8 @@ class FunctionGraph(utils.object2):
             self.__setup_r__(input)
             self.variables.add(input)
 
-        self.__import_r__(outputs, reason="init")
+        for output in outputs:
+            self.__import_r__(output, reason="init")
         for i, output in enumerate(outputs):
             output.clients.append(('output', i))
 
@@ -139,7 +143,7 @@ class FunctionGraph(utils.object2):
         self.variable_locks = {}
         self.profile = None
 
-    ### Setup a Variable ###
+    # Setup a Variable #
     def __setup_r__(self, r):
         # sets up r so it belongs to this fgraph
         if getattr(r, 'cached', False):
@@ -148,32 +152,32 @@ class FunctionGraph(utils.object2):
                 " graph that has a cached constant. This should not happen."
                 " Clone the graph before building the FunctionGraph.")
         if (hasattr(r, 'fgraph') and
-            r.fgraph is not None and
-            r.fgraph is not self):
+                r.fgraph is not None and
+                r.fgraph is not self):
             raise Exception("%s is already owned by another fgraph" % r)
         r.fgraph = self
         r.clients = []
-        #self.execute_callbacks('on_setup_variable', r)
+        # self.execute_callbacks('on_setup_variable', r)
 
     def __setup_node__(self, node):
         # sets up node so it belongs to this fgraph
         if hasattr(node, 'fgraph') and node.fgraph is not self:
             raise Exception("%s is already owned by another fgraph" % node)
         if (hasattr(node.op, 'view_map') and
-            not all([isinstance(view, (list, tuple))
-                     for view in node.op.view_map.values()])):
+            not all(isinstance(view, (list, tuple))
+                    for view in itervalues(node.op.view_map))):
             raise Exception("Op '%s' have a bad view map '%s',"
                             " the values must be tuples or lists." % (
                                 str(node.op), str(node.op.view_map)))
         if (hasattr(node.op, 'destroy_map') and
-            not all([isinstance(destroy, (list, tuple))
-                     for destroy in node.op.destroy_map.values()])):
+            not all(isinstance(destroy, (list, tuple))
+                    for destroy in itervalues(node.op.destroy_map))):
             raise Exception("Op '%s' have a bad destroy map '%s',"
                             " the values must be tuples or lists." % (
                                 str(node.op), str(node.op.destroy_map)))
         node.fgraph = self
         node.deps = {}
-        #self.execute_callbacks('on_setup_node', node)
+        # self.execute_callbacks('on_setup_node', node)
 
     def disown(self):
         """ WRITEME
@@ -197,7 +201,7 @@ class FunctionGraph(utils.object2):
         self.inputs = None
         self.outputs = None
 
-    ### clients ###
+    # clients #
     def clients(self, r):
         """
         Set of all the (node, i) pairs such that node.inputs[i] is r.
@@ -215,11 +219,11 @@ class FunctionGraph(utils.object2):
         Updates the list of clients of r with new_clients.
         """
         if set(r.clients).intersection(set(new_clients)):
-            print >> sys.stderr, 'ERROR: clients intersect!'
-            print >> sys.stderr, '  RCLIENTS of', r, [(n, i, type(n), id(n))
-                                                      for n, i in r.clients]
-            print >> sys.stderr, '  NCLIENTS of', r, [(n, i, type(n), id(n))
-                                                      for n, i in new_clients]
+            print('ERROR: clients intersect!', file=sys.stderr)
+            print('  RCLIENTS of', r, [(n, i, type(n), id(n))
+                                       for n, i in r.clients], file=sys.stderr)
+            print('  NCLIENTS of', r, [(n, i, type(n), id(n))
+                                       for n, i in new_clients], file=sys.stderr)
         assert not set(r.clients).intersection(set(new_clients))
         r.clients += new_clients
 
@@ -233,45 +237,39 @@ class FunctionGraph(utils.object2):
         """
         for entry in clients_to_remove:
             r.clients.remove(entry)
-            if entry in r.clients:
-                print >> sys.stderr, 'ERROR: DUPLICATE CLIENT ENTRY...'
-                print >> sys.stderr, '  ENTRY', repr(entry), type(entry[0])
-                print >> sys.stderr, '  CLIENTS', repr(r.clients)
             assert entry not in r.clients  # an op,i pair should be unique
         if not r.clients:
             if prune:
-                self.__prune_r__([r], reason)
+                self.__prune_r__(r, reason)
                 return False
             return True
         return False
 
-    ### import ###
-    def __import_r__(self, variables, reason):
+    # import #
+    def __import_r__(self, variable, reason):
         global NullType
         if NullType is None:
-            from null_type import NullType
+            from .null_type import NullType
         # Imports the owners of the variables
-        for apply_node in [r.owner for r in variables if r.owner is not None]:
-            if apply_node not in self.apply_nodes:
-                self.__import__(apply_node, reason=reason)
-        for r in variables:
-            if r.owner is None and not isinstance(r, graph.Constant) and r not in self.inputs:
-                if isinstance(r.type, NullType):
-                    raise TypeError("Computation graph contains a NaN. " +
-                                    r.type.why_null)
-                raise MissingInputError("Undeclared input", r)
-            if not getattr(r, 'fgraph', None) is self:
-                self.__setup_r__(r)
-            self.variables.add(r)
+        if variable.owner and variable.owner not in self.apply_nodes:
+                self.__import__(variable.owner, reason=reason)
+        if (variable.owner is None and
+                not isinstance(variable, graph.Constant) and
+                variable not in self.inputs):
+            if isinstance(variable.type, NullType):
+                raise TypeError("Computation graph contains a NaN. " +
+                                variable.type.why_null)
+            raise MissingInputError("Undeclared input", variable)
+        if not getattr(variable, 'fgraph', None) is self:
+            self.__setup_r__(variable)
+        self.variables.add(variable)
 
     def __import__(self, apply_node, check=True, reason=None):
-        node = apply_node
-
         # We import the nodes in topological order. We only are interested
         # in new nodes, so we use all variables we know of as if they were the input set.
         # (the functions in the graph module only use the input set to
         # know where to stop going down)
-        new_nodes = graph.io_toposort(self.variables, node.outputs)
+        new_nodes = graph.io_toposort(self.variables, apply_node.outputs)
 
         if check:
             for node in new_nodes:
@@ -281,9 +279,8 @@ class FunctionGraph(utils.object2):
                     if hasattr(r, 'fgraph') and r.fgraph is not self:
                         raise Exception("%s is already owned by another fgraph" % r)
                     if (r.owner is None and
-                        not isinstance(r, graph.Constant) and
-                        r not in self.inputs):
-
+                            not isinstance(r, graph.Constant) and
+                            r not in self.inputs):
                         # Verbose error message
                         # Show a complete chain of variables from the missing input to an output
                         if config.exception_verbosity == 'high':
@@ -334,15 +331,17 @@ class FunctionGraph(utils.object2):
                             # if there is no path then r isn't really a graph input so we shouldn't be running error
                             # handler code in the first place
                             assert path is not None
-                            tr = getattr(r.tag, 'trace', None)
+                            tr = getattr(r.tag, 'trace', [])
                             detailed_err_msg = ""
-                            if tr:
-                                sio = StringIO.StringIO()
-                                traceback.print_list(tr, sio)
-                                tr = sio.getvalue()
+                            if len(tr) > 0:
                                 detailed_err_msg += "\nBacktrace when the variable is created:\n"
-                                detailed_err_msg += str(tr)
 
+                                # Print separate message for each element in
+                                # the list of batcktraces
+                                sio = StringIO()
+                                for subtr in tr:
+                                    traceback.print_list(subtr, sio)
+                                    detailed_err_msg += str(sio.getvalue())
                             raise MissingInputError(
                                 'A variable that is an input to the graph was '
                                 'neither provided as an input to the function '
@@ -375,37 +374,64 @@ class FunctionGraph(utils.object2):
             assert node.fgraph is self
             self.execute_callbacks('on_import', node, reason)
 
-    ### prune ###
-    def __prune_r__(self, variables, reason=None):
+    # prune #
+    def __prune_r__(self, variable, reason=None):
+        """Should be called for variable that aren't used anymore:
+        len(var.clients) == 0
+
+        This do not mean we will remove it from fgraph.variables. If
+        the owner stay in the fgraph as other outputs are still used,
+        the variable will be stay in fgraph.variables.
+
+        """
         # Prunes the owners of the variables.
-        for node in set(r.owner for r in variables if r.owner is not None):
-            self.__prune__(node, reason)
-        for r in variables:
-            if not r.clients and r in self.variables:
-                self.variables.remove(r)
+        if variable.owner:
+            self.__prune__(variable.owner, reason)
+        # variable should not have any clients.
+        # assert not variable.clients
+
+        # variable should be in self.variables
+        # Why this assert fail? Making it True could cause opt speed up
+        # I think this is caused as we remove var in self.variables in
+        # another place.
+        # assert variable in self.variables
+
+        if variable in self.variables:
+            # If the owner have other outputs still used,
+            # then we must keep that variable in the graph.
+            if not variable.owner or not any(
+                [var for var in variable.owner.outputs
+                 if var.clients]):
+
+                self.variables.remove(variable)
+                # This allow to quickly know if a var is still in the fgraph
+                # or not.
+                del variable.fgraph
 
     def __prune__(self, apply_node, reason=None):
-        node = apply_node
-        if node not in self.apply_nodes:
-            raise Exception("%s does not belong to this FunctionGraph and cannot be pruned." % node)
-        assert node.fgraph is self
-        # If node's outputs have no clients, removes it from the graph
+        """Always called on owner of pruned variable from the graph.
+
+        This do not mean we will remove it from the graph. If other
+        outputs are still used, we will keep the node in the graph.
+
+        """
+        # If apply_node's outputs have no clients, removes it from the graph
         # and recursively tries to prune its inputs. If at least one
         # of the op's outputs is an output to the graph or has a client
         # then __prune__ is a no-op.
-        for output in node.outputs:
+        for output in apply_node.outputs:
             # Cannot prune an op which is an output or used somewhere
-            if self.clients(output) or output in self.outputs:  # output in self.outputs or self.clients(output):
+            if output.clients or output in self.outputs:
                 return
-        self.apply_nodes.remove(node)
-        self.variables.difference_update(node.outputs)
-        self.execute_callbacks('on_prune', node, reason)
+        self.apply_nodes.remove(apply_node)
+        self.variables.difference_update(apply_node.outputs)
+        self.execute_callbacks('on_prune', apply_node, reason)
 
-        for i, input in enumerate(node.inputs):
-            self.__remove_clients__(input, [(node, i)], reason=reason)
-        # self.__prune_r__(node.inputs)
+        for i, input in enumerate(apply_node.inputs):
+            self.__remove_clients__(input, [(apply_node, i)], reason=reason)
+        # self.__prune_r__(apply_node.inputs)
 
-    ### change input ###
+    # change input #
     def change_input(self, node, i, new_r, reason=None):
         """WRITEME
         Changes node.inputs[i] to new_r.
@@ -438,7 +464,7 @@ class FunctionGraph(utils.object2):
         if r is new_r:
             return
 
-        self.__import_r__([new_r], reason=reason)
+        self.__import_r__(new_r, reason=reason)
         self.__add_clients__(new_r, [(node, i)])
         prune = self.__remove_clients__(r, [(node, i)], False)
         # Precondition: the substitution is semantically valid
@@ -448,9 +474,9 @@ class FunctionGraph(utils.object2):
                                r, new_r, reason=reason)
 
         if prune:
-            self.__prune_r__([r], reason=reason)
+            self.__prune_r__(r, reason=reason)
 
-    ### replace ###
+    # replace #
     def replace(self, r, new_r, reason=None, verbose=None):
         """ WRITEME
         This is the main interface to manipulate the subgraph in FunctionGraph.
@@ -459,8 +485,8 @@ class FunctionGraph(utils.object2):
         if verbose is None:
             verbose = config.optimizer_verbose
         if verbose:
-            print reason, r, new_r
-        if r.fgraph is not self:
+            print(reason, r, new_r)
+        if hasattr(r, 'fgraph') and r.fgraph is not self:
             raise Exception("Cannot replace %s because it does not belong "
                             "to this FunctionGraph" % r, str(reason))
         if r.type != new_r.type:
@@ -549,14 +575,15 @@ class FunctionGraph(utils.object2):
 
         """
         try:
+            # Why do we catch the exeception anyway?
             self._features.remove(feature)
-        except Exception:
+        except ValueError:
             return
         detach = getattr(feature, 'on_detach', None)
         if detach is not None:
             detach(self)
 
-    ### callback utils ###
+    # callback utils #
     def execute_callbacks(self, name, *args, **kwargs):
         """WRITEME
         Calls
@@ -592,7 +619,7 @@ class FunctionGraph(utils.object2):
             d[feature] = fn(*args)
         return d
 
-    ### misc ###
+    # misc #
     def toposort(self):
         """WRITEME
         Returns an ordering of the graph's Apply nodes such that:
@@ -642,7 +669,7 @@ class FunctionGraph(utils.object2):
                                     str(feature.orderings) +
                                     ". Nondeterministic object is " +
                                     str(orderings))
-                for node, prereqs in orderings.items():
+                for node, prereqs in iteritems(orderings):
                     if not isinstance(prereqs, (list, OrderedSet)):
                         raise TypeError(
                             "prereqs must be a type with a "
@@ -650,13 +677,9 @@ class FunctionGraph(utils.object2):
                             " will be non-deterministic.")
                     ords.setdefault(node, []).extend(prereqs)
         # eliminate duplicate prereqs
-        for (node, prereqs) in ords.items():
+        for (node, prereqs) in iteritems(ords):
             ords[node] = list(OrderedSet(prereqs))
         return ords
-
-    def nclients(self, r):
-        """WRITEME Same as len(self.clients(r))."""
-        return len(self.clients(r))
 
     def check_integrity(self):
         """WRITEME
@@ -690,8 +713,8 @@ class FunctionGraph(utils.object2):
                 missing, excess)
         for variable in variables:
             if (variable.owner is None and
-                variable not in self.inputs and
-                not isinstance(variable, graph.Constant)):
+                    variable not in self.inputs and
+                    not isinstance(variable, graph.Constant)):
                 raise Exception("Undeclared input.", variable)
             if variable.fgraph is not self:
                 raise Exception("Variable should belong to the FunctionGraph.",
@@ -715,7 +738,7 @@ class FunctionGraph(utils.object2):
     def __repr__(self):
         return self.__str__()
 
-    ### clone ###
+    # clone #
     def clone(self, check_integrity=True):
         """WRITEME"""
         return self.clone_get_equiv(check_integrity)[0]

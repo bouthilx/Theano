@@ -1,6 +1,14 @@
-import numpy, scipy.linalg
-from theano import gof, tensor, scalar
+from __future__ import print_function
+
 import unittest
+import sys
+
+import numpy
+import scipy.linalg
+
+import theano
+from theano import gof, tensor, scalar
+from theano.tests import unittest_tools as utt
 
 
 class Solve(gof.Op):
@@ -31,14 +39,14 @@ class Solve(gof.Op):
             raise TypeError("b must be a matrix or vector", b_.type)
         odtype = scalar.upcast(A_.dtype, b_.dtype)
         otype = tensor.TensorType(broadcastable=b_.broadcastable, dtype=odtype)
-        return gof.Apply(op=self, inputs=[A, B], outputs=[otype()])
+        return gof.Apply(op=self, inputs=[A_, b_], outputs=[otype()])
 
     def perform(self, node, inp, out):
         A, b = inp
         output, = out
         ret = scipy.linalg.solve(A, b)
         if ret.dtype != node.outputs[0].dtype:
-            print >> sys.stderr, "WARNING: Solve.perform() required cast."
+            print("WARNING: Solve.perform() required cast.", file=sys.stderr)
             ret = theano._asarray(ret, dtype=node.outputs[0].dtype)
         output[0] = ret
 
@@ -48,8 +56,6 @@ solve = Solve()
 # TODO: test dtype conversion
 # TODO: test that invalid types are rejected by make_node
 # TODO: test that each valid type for A and b works correctly
-from theano.tests import unittest_tools as utt
-
 
 class T_solve(unittest.TestCase):
     def setUp(self):
@@ -57,7 +63,7 @@ class T_solve(unittest.TestCase):
 
     def test0(self):
         A = self.rng.randn(5, 5)
-        b = numpy.array(range(5), dtype=float)
+        b = numpy.arange(5, dtype=float)
         x = scipy.linalg.solve(A, b)
         Ax = numpy.dot(A, x)
         are = tensor.numeric_grad.abs_rel_err(Ax, b)

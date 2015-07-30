@@ -2,7 +2,7 @@ import copy
 
 import numpy
 
-from type import TypedListType
+from .type import TypedListType
 import theano
 from theano.gof import Apply, Constant, Op, Variable
 from theano.tensor.type_other import SliceType
@@ -56,12 +56,7 @@ TypedListType.Variable = TypedListVariable
 class GetItem(Op):
     # See doc in instance of this Op or function after this class definition.
     view_map = {0: [0]}
-
-    def __eq__(self, other):
-        return type(self) == type(other)
-
-    def __hash__(self):
-        return hash(type(self))
+    __props__ = ()
 
     def make_node(self, x, index):
         assert isinstance(x.type, TypedListType)
@@ -80,7 +75,9 @@ class GetItem(Op):
         else:
             raise TypeError('Expected scalar or slice as index.')
 
-    def perform(self, node, (x, index), (out, )):
+    def perform(self, node, inputs, outputs):
+        (x, index) = inputs
+        (out,) = outputs
         if not isinstance(index, slice):
             index = int(index)
         out[0] = x[index]
@@ -114,6 +111,8 @@ Get specified slice of a typed list.
 
 class Append(Op):
     # See doc in instance of this Op after the class definition.
+    __props__ = ("inplace",)
+
     def __init__(self, inplace=False):
         self.inplace = inplace
         if self.inplace:
@@ -126,18 +125,14 @@ class Append(Op):
             # self.view_map = {0: [0, 1]}
             self.view_map = {0: [0]}
 
-    def __eq__(self, other):
-        return type(self) == type(other) and self.inplace == other.inplace
-
-    def __hash__(self):
-        return hash(type(self)) ^ hash(self.inplace)
-
     def make_node(self, x, toAppend):
         assert isinstance(x.type, TypedListType)
         assert x.ttype == toAppend.type, (x.ttype, toAppend.type)
         return Apply(self, [x, toAppend], [x.type()])
 
-    def perform(self, node, (x, toAppend), (out, )):
+    def perform(self, node, inputs, outputs):
+        (x, toAppend) = inputs
+        (out,) = outputs
         if not self.inplace:
             out[0] = list(x)
         else:
@@ -186,6 +181,8 @@ Append an element at the end of another list.
 
 class Extend(Op):
     # See doc in instance of this Op after the class definition.
+    __props__ = ("inplace",)
+
     def __init__(self, inplace=False):
         self.inplace = inplace
         if self.inplace:
@@ -198,18 +195,14 @@ class Extend(Op):
             # self.view_map = {0: [0, 1]}
             self.view_map = {0: [0]}
 
-    def __eq__(self, other):
-        return type(self) == type(other) and self.inplace == other.inplace
-
-    def __hash__(self):
-        return hash(type(self)) ^ hash(self.inplace)
-
     def make_node(self, x, toAppend):
         assert isinstance(x.type, TypedListType)
         assert x.type == toAppend.type
         return Apply(self, [x, toAppend], [x.type()])
 
-    def perform(self, node, (x, toAppend), (out, )):
+    def perform(self, node, inputs, outputs):
+        (x, toAppend) = inputs
+        (out,) = outputs
         if not self.inplace:
             out[0] = list(x)
         else:
@@ -264,6 +257,8 @@ Append all elements of a list at the end of another list.
 
 class Insert(Op):
     # See doc in instance of this Op after the class definition.
+    __props__ = ("inplace",)
+
     def __init__(self, inplace=False):
         self.inplace = inplace
         if self.inplace:
@@ -276,12 +271,6 @@ class Insert(Op):
             # self.view_map = {0: [0, 2]}
             self.view_map = {0: [0]}
 
-    def __eq__(self, other):
-        return type(self) == type(other) and self.inplace == other.inplace
-
-    def __hash__(self):
-        return hash(type(self)) ^ hash(self.inplace)
-
     def make_node(self, x, index, toInsert):
         assert isinstance(x.type, TypedListType)
         assert x.ttype == toInsert.type
@@ -292,7 +281,9 @@ class Insert(Op):
             assert isinstance(index, T.TensorVariable) and index.ndim == 0
         return Apply(self, [x, index, toInsert], [x.type()])
 
-    def perform(self, node, (x, index, toInsert), (out, )):
+    def perform(self, node, inputs, outputs):
+        (x, index, toInsert) = inputs
+        (out,) = outputs
         if not self.inplace:
             out[0] = list(x)
         else:
@@ -342,6 +333,8 @@ Insert an element at an index in a typed list.
 
 class Remove(Op):
     # See doc in instance of this Op after the class definition.
+    __props__ = ("inplace",)
+
     def __init__(self, inplace=False):
         self.inplace = inplace
         if self.inplace:
@@ -349,19 +342,14 @@ class Remove(Op):
         else:
             self.view_map = {0: [0]}
 
-    def __eq__(self, other):
-        return type(self) == type(other) and self.inplace == other.inplace
-
-    def __hash__(self):
-        return hash(type(self)) ^ hash(self.inplace)
-
     def make_node(self, x, toRemove):
         assert isinstance(x.type, TypedListType)
         assert x.ttype == toRemove.type
         return Apply(self, [x, toRemove], [x.type()])
 
-    def perform(self, node, (x, toRemove), (out, )):
-
+    def perform(self, node, inputs, outputs):
+        (x, toRemove) = inputs
+        (out,) = outputs
         if not self.inplace:
             out[0] = list(x)
         else:
@@ -396,6 +384,8 @@ remove = Remove()
 
 class Reverse(Op):
     # See doc in instance of this Op after the class definition.
+    __props__ = ("inplace",)
+
     def __init__(self, inplace=False):
         self.inplace = inplace
         if self.inplace:
@@ -403,18 +393,12 @@ class Reverse(Op):
         else:
             self.view_map = {0: [0]}
 
-    def __eq__(self, other):
-        return type(self) == type(other) and self.inplace == other.inplace
-
-    def __hash__(self):
-        return hash(type(self)) ^ hash(self.inplace)
-
     def make_node(self, x):
         assert isinstance(x.type, TypedListType)
         return Apply(self, [x], [x.type()])
 
-    def perform(self, node, inp, (out, )):
-
+    def perform(self, node, inp, outputs):
+        (out,) = outputs
         if not self.inplace:
             out[0] = list(inp[0])
         else:
@@ -459,23 +443,21 @@ Reverse the order of a typed list.
 
 class Index(Op):
     # See doc in instance of this Op after the class definition.
-    def __eq__(self, other):
-        return type(self) == type(other)
-
-    def __hash__(self):
-        return hash(type(self))
+    __props__ = ()
 
     def make_node(self, x, elem):
         assert isinstance(x.type, TypedListType)
         assert x.ttype == elem.type
         return Apply(self, [x, elem], [T.scalar()])
 
-    def perform(self, node, (x, elem), (out, )):
+    def perform(self, node, inputs, outputs):
         """
         inelegant workaround for ValueError: The truth value of an
         array with more than one element is ambiguous. Use a.any() or a.all()
         being thrown when trying to remove a matrix from a matrices list
         """
+        (x, elem) = inputs
+        (out,) = outputs
         for y in range(len(x)):
             if node.inputs[0].ttype.values_eq(x[y], elem):
                 out[0] = numpy.asarray(y, dtype=theano.config.floatX)
@@ -489,23 +471,21 @@ index_ = Index()
 
 class Count(Op):
     # See doc in instance of this Op after the class definition.
-    def __eq__(self, other):
-        return type(self) == type(other)
-
-    def __hash__(self):
-        return hash(type(self))
+    __props__ = ()
 
     def make_node(self, x, elem):
         assert isinstance(x.type, TypedListType)
         assert x.ttype == elem.type
         return Apply(self, [x, elem], [T.scalar()])
 
-    def perform(self, node, (x, elem), (out, )):
+    def perform(self, node, inputs, outputs):
         """
         inelegant workaround for ValueError: The truth value of an
         array with more than one element is ambiguous. Use a.any() or a.all()
         being thrown when trying to remove a matrix from a matrices list
         """
+        (x, elem) = inputs
+        (out,) = outputs
         out[0] = 0
         for y in range(len(x)):
             if node.inputs[0].ttype.values_eq(x[y], elem):
@@ -532,18 +512,14 @@ Count the number of times an element is in the typed list.
 
 class Length(Op):
     # See doc in instance of this Op after the class definition.
-
-    def __eq__(self, other):
-        return type(self) == type(other)
-
-    def __hash__(self):
-        return hash(type(self))
+    __props__ = ()
 
     def make_node(self, x):
         assert isinstance(x.type, TypedListType)
         return Apply(self, [x], [T.scalar(dtype='int64')])
 
-    def perform(self, node, x, (out, )):
+    def perform(self, node, x, outputs):
+        (out,) = outputs
         out[0] = numpy.asarray(len(x[0]), 'int64')
 
     def __str__(self):
@@ -573,11 +549,7 @@ Returns the size of a list.
 
 class MakeList(Op):
 
-    def __eq__(self, other):
-        return type(self) == type(other)
-
-    def __hash__(self):
-        return hash(type(self))
+    __props__ = ()
 
     def make_node(self, a):
         assert isinstance(a, (tuple, list))
@@ -593,7 +565,8 @@ class MakeList(Op):
 
         return Apply(self, a2, [tl])
 
-    def perform(self, node, inputs, (out, )):
+    def perform(self, node, inputs, outputs):
+        (out,) = outputs
         out[0] = list(inputs)
 
 make_list = MakeList()

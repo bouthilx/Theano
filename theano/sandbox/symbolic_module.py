@@ -1,7 +1,10 @@
+from __future__ import print_function
 import copy, inspect
 import theano
 import theano.tensor as T
 
+from six import string_types, add_metaclass, iteritems
+from six.moves import xrange
 #import klass
 
 
@@ -23,15 +26,15 @@ class InitGraph(type):
                     return True
                 return isinstance(v, theano.Variable) and not k.startswith('_')
             r = {}
-            for key, val in dct.items():
-                if filter(key, val):
+            for key, val in iteritems(dct):
+                if list(filter(key, val)):
                     r[key] = val
             return r
         build_graph_rval = cls.build_graph()
         if not isinstance(build_graph_rval, dict):
             raise TypeError('%s.build_graph did not return dictionary' % cls)
         dct = just_symbolic(build_graph_rval)
-        for key, val in dct.items():
+        for key, val in iteritems(dct):
             # print '  adding class attribute', key
             if isinstance(val, theano.Variable) and val.name is None:
                 val.name = key
@@ -41,10 +44,9 @@ class InitGraph(type):
                 setattr(cls, key, val)
 
 
+# installs class attributes from build_graph after declaration
+@add_metaclass(InitGraph)
 class SymbolicModule(object):
-    # installs class attributes from build_graph after declaration
-    __metaclass__ = InitGraph
-
     # if we call this function, it will return a new SymbolicModule
     def __new__(self, **kwargs):
         class SymMod(SymbolicModule):
@@ -131,7 +133,7 @@ def compile(smod, initial_values=None):
                 elif issymbolicmodule(val):
                     for s in modwalker(val.__dict__, [v for k, v in sym_items(val)]):
                         yield s
-                elif isinstance(val, (basestring, int, float)):
+                elif isinstance(val, (string_types, int, float)):
                     pass
                 elif isinstance(val, theano.Variable):
                     pass
@@ -182,7 +184,7 @@ def compile(smod, initial_values=None):
                 reflected[thing] = cmod
                 for key, val in sym_items(thing):
                     setattr(CMod, key, reflect(val))
-            elif isinstance(thing, (basestring, int, float)):
+            elif isinstance(thing, (string_types, int, float)):
                 reflected[thing] = thing
             elif isinstance(thing, theano.Variable):
                 if thing.owner is None:
@@ -191,7 +193,7 @@ def compile(smod, initial_values=None):
                     def setter(s, v):
                         inputs[thing].value.storage[0] = v
                     p = property(getter, setter)
-                    print p
+                    print(p)
                     reflected[thing] = p
                 else:
                     reflected[thing] = None  # TODO: how to reflect derived resuls?
@@ -277,7 +279,7 @@ def NNet(x=None, y=None, n_hid_layers=2):
         rval = classif.params()
         for l in layers:
             rval.extend(l.params())
-        print [id(r) for r in rval]
+        print([id(r) for r in rval])
         return rval
 
     if 0:
@@ -290,12 +292,12 @@ def NNet(x=None, y=None, n_hid_layers=2):
     return locals()
 nnet = compile(NNet)
 
-print nnet
-print nnet.params()
-print nnet.params.__dict__['finder'][NNet.layers[0].w]
+print(nnet)
+print(nnet.params())
+print(nnet.params.__dict__['finder'][NNet.layers[0].w])
 nnet.params[NNet.layers[0].w] = [[6]]
-print nnet.params()
-print nnet.params()
+print(nnet.params())
+print(nnet.params())
 
 if 0:
     def deco(f):
@@ -303,13 +305,13 @@ if 0:
             def __call__(self, *args, **kwargs):
                 # return another SymbolicModule built like self
                 def dummy(*dargs, **dkwargs):
-                    print 'args', args, dargs
-                    print 'kwargs', kwargs, dkwargs
+                    print('args', args, dargs)
+                    print('kwargs', kwargs, dkwargs)
                     return f(*args, **kwargs)
                 return deco(dummy)
 
         locals_dict = f()
-        for key, val in locals_dict.items():
+        for key, val in iteritems(locals_dict):
             if isinstance(val, theano.Variable):
                 try:
                     kres = klass.KlassMember(val)
@@ -349,7 +351,7 @@ if 0:
             ):
         hid = T.tanh(T.dot(x, w) + b)
         if top_part:
-            print 'top_part', top_part, 'kwargs', kwargs
+            print('top_part', top_part, 'kwargs', kwargs)
             top = top_part(x=hid, **kwargs)  # SymbolicModule
             def params(): return top.params() + [w, b]
         else:
@@ -357,12 +359,12 @@ if 0:
         return just_symbolic(locals())
 
     if 0:
-        print 'logistic_regression', logistic_regression
-        print 'tanh_layer', tanh_layer
-        print 'nnet1', nnet1
+        print('logistic_regression', logistic_regression)
+        print('tanh_layer', tanh_layer)
+        print('nnet1', nnet1)
     nnet1 = tanh_layer(logistic_regression)
     nnet2 = tanh_layer(nnet1)
-    print 'nnet2', nnet2
+    print('nnet2', nnet2)
 
 if 0:
     class SymbolicModule(object):

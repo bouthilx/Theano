@@ -1,8 +1,9 @@
+from __future__ import print_function
 import unittest
-from itertools import imap
 
 import numpy
 
+from theano.compat import imap
 import theano.tensor.inplace
 from theano.tensor import basic as tensor
 from theano import tensor as T
@@ -258,11 +259,11 @@ class T_sigmoid_opts(unittest.TestCase):
                     compute_mul(trees[0]),
                     compute_mul(trees[1]))
             if not good:
-                print trees[0]
-                print trees[1]
-                print '***'
+                print(trees[0])
+                print(trees[1])
+                print('***')
                 theano.printing.debugprint(compute_mul(trees[0]))
-                print '***'
+                print('***')
                 theano.printing.debugprint(compute_mul(trees[1]))
             assert good
         ok(sigmoid(x) * exp(-x), sigmoid(-x))

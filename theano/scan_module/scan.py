@@ -42,11 +42,13 @@ __copyright__ = "(c) 2010, Universite de Montreal"
 __contact__ = "Razvan Pascanu <r.pascanu@gmail>"
 
 
-import itertools
 import logging
 import numpy
 import warnings
 
+from theano.compat import ifilter, izip
+from six import iteritems
+from six.moves import xrange
 from theano.compile import SharedVariable, function
 from theano import compile
 from theano import gof
@@ -318,7 +320,7 @@ def scan(fn,
 
     :param strict:
         If true, all the shared variables used in ``fn`` must be provided as a
-        part of ``non_sequences`` or ``sequences``. 
+        part of ``non_sequences`` or ``sequences``.
 
     :rtype: tuple
     :return: tuple of the form (outputs, updates); ``outputs`` is either a
@@ -480,7 +482,7 @@ def scan(fn,
                     try:
                         nw_slice.tag.test_value = gof.Op._get_test_value(
                             _seq_val_slice)
-                    except AttributeError, e:
+                    except AttributeError as e:
                         if config.compute_test_value != 'ignore':
                             # No need to print a warning or raise an error now,
                             # it will be done when fn will be called.
@@ -500,20 +502,18 @@ def scan(fn,
                     nw_slice.name = nw_name
 
                 # We cut the sequence such that seq[i] to correspond to
-                # seq[i-k]
-                if maxtap < 0:
-                    offset = abs(maxtap)
+                # seq[i-k]. For the purposes of cutting the sequences, we
+                # need to pretend tap 0 is used to avoid cutting the sequences
+                # too long if the taps are all lower or all higher than 0.
+                maxtap_proxy = max(maxtap, 0)
+                mintap_proxy = min(mintap, 0)
+                start = (k - mintap_proxy)
+                if k == maxtap_proxy:
+                    nw_seq = seq['input'][start:]
                 else:
-                    offset = 0
-                if maxtap == mintap and maxtap != 0:
-                    if maxtap < 0:
-                        nw_seq = seq['input'][:maxtap]
-                    else:
-                        nw_seq = seq['input'][maxtap:]
-                elif maxtap - k != 0:
-                    nw_seq = seq['input'][offset + k - mintap: -(maxtap - k)]
-                else:
-                    nw_seq = seq['input'][offset + k - mintap:]
+                    end = -(maxtap_proxy - k)
+                    nw_seq = seq['input'][start:end]
+
                 if go_backwards:
                     nw_seq = nw_seq[::-1]
 
@@ -612,7 +612,7 @@ def scan(fn,
             if config.compute_test_value != 'off':
                 try:
                     arg.tag.test_value = gof.Op._get_test_value(actual_arg)
-                except AttributeError, e:
+                except AttributeError as e:
                     if config.compute_test_value != 'ignore':
                         # No need to print a warning or raise an error now,
                         # it will be done when fn will be called.
@@ -672,7 +672,7 @@ def scan(fn,
                     try:
                         nw_slice.tag.test_value = gof.Op._get_test_value(
                             _init_out_var_slice)
-                    except AttributeError, e:
+                    except AttributeError as e:
                         if config.compute_test_value != 'ignore':
                             # No need to print a warning or raise an error now,
                             # it will be done when fn will be called.
@@ -791,9 +791,9 @@ def scan(fn,
     # as non sequences at the end of our args
     fake_nonseqs = [x.type() for x in non_seqs]
     fake_outputs = scan_utils.clone(outputs,
-                                    replace=OrderedDict(zip(non_seqs,
-                                                     fake_nonseqs)))
-    all_inputs = itertools.ifilter(
+                                    replace=OrderedDict(izip(non_seqs,
+                                                             fake_nonseqs)))
+    all_inputs = ifilter(
         lambda x: (isinstance(x, gof.Variable) and
                    not isinstance(x, SharedVariable) and
                    not isinstance(x, gof.Constant)),
@@ -870,7 +870,8 @@ def scan(fn,
                         tensor.unbroadcast(
                             tensor.shape_padleft(input.variable), 0),
                         actual_n_steps))
-                sit_sot_inner_outputs.append(input.update)
+                tensor_update = tensor.as_tensor_variable(input.update)
+                sit_sot_inner_outputs.append(tensor_update)
                 # Not that pos is not a negative index. The sign of pos is used
                 # as a flag to indicate if this output should be part of the
                 # update rules or part of the standard outputs of scan.
@@ -915,7 +916,7 @@ def scan(fn,
                          if (not isinstance(arg, SharedVariable) and
                              not isinstance(arg, tensor.Constant))]
 
-    givens.update(OrderedDict(zip(other_scan_args, other_inner_args)))
+    givens.update(OrderedDict(izip(other_scan_args, other_inner_args)))
 
     if strict:
         non_seqs_set = set(non_sequences if non_sequences != None else [])
@@ -939,8 +940,8 @@ def scan(fn,
                             in dummy_f.maker.expanded_inputs
                             if (isinstance(arg.variable, SharedVariable) and
                                 not arg.update)]
-    givens.update(OrderedDict(zip(other_shared_scan_args,
-                           other_shared_inner_args)))
+    givens.update(OrderedDict(izip(other_shared_scan_args,
+                                   other_shared_inner_args)))
 
     ##
     # Step 6. Re-order the outputs and clone them replacing things
@@ -961,21 +962,22 @@ def scan(fn,
                   shared_inner_outputs)
     if condition is not None:
         inner_outs.append(condition)
-    # Cuda is imported here, instead of being imported on top of the file
-    # because forces on the user some dependencies that we might do not want
-    # to. Currently we are working on removing the dependencies on sandbox
-    # code completeley.
-    from theano.sandbox import cuda
-    if cuda.cuda_available:
+    # Cuda and Gpuarray are imported here, instead of being imported on top of
+    # the file because that would force on the user some dependencies that we
+    # might do not want to. Currently we are working on removing the
+    # dependencies on sandbox code completeley.
+    from theano.sandbox import cuda, gpuarray
+    if cuda.cuda_available or gpuarray.pygpu_activated:
         # very often we end up in this situation when we want to
-        # replace w with w_copy, where w is CudaNdarray
+        # replace w with w_copy, where w is a GPU variable
         # and w_copy is TensorType. This is caused because shared
         # variables are put on GPU right aways >:| ,
         new_givens = OrderedDict()
 
-        for w, w_copy in givens.iteritems():
-            if (isinstance(w.type, cuda.CudaNdarrayType)
-                and isinstance(w_copy.type, tensor.TensorType)):
+        for w, w_copy in iteritems(givens):
+            if ((isinstance(w.type, cuda.CudaNdarrayType) or
+                 isinstance(w.type, gpuarray.GpuArrayType)) and
+                isinstance(w_copy.type, tensor.TensorType)):
                 for o in inner_outs:
                     new_givens = traverse(o, w, w_copy, new_givens)
             else:

@@ -1,18 +1,19 @@
+from __future__ import print_function
 # For flag of bool type, we consider the strings 'False', 'false' and '0'
 # as False, and the string s'True', 'true', '1' as True.
 # We also accept the bool type as its corresponding value!
 
-import inspect
 import logging
 import os
 import shlex
 import sys
 import warnings
 
-from theano.compat.six import StringIO
+from six import StringIO
 
 import theano
 from theano.compat import configparser as ConfigParser
+from six import string_types
 
 _logger = logging.getLogger('theano.configparser')
 
@@ -88,6 +89,41 @@ theano_raw_cfg = ConfigParser.RawConfigParser()
 theano_raw_cfg.read(config_files)
 
 
+def change_flags(**kwargs):
+    """
+    Use this as a decorator to change the value of Theano config variable.
+
+    Useful during tests.
+    """
+    def change_flags_exec(f):
+        def inner(*args, **kwargs_):
+            old_val = {}
+            for k in kwargs:
+                l = [v for v in theano.configparser._config_var_list
+                     if v.fullname == k]
+                assert len(l) == 1
+                old_val[k] = l[0].__get__()
+            try:
+                for k in kwargs:
+                    l = [v for v in theano.configparser._config_var_list
+                         if v.fullname == k]
+                    assert len(l) == 1
+                    l[0].__set__(None, kwargs[k])
+                return f(*args, **kwargs_)
+            finally:
+                for k in kwargs:
+                    l = [v for v in theano.configparser._config_var_list
+                         if v.fullname == k]
+                    assert len(l) == 1
+                    l[0].__set__(None, old_val[k])
+
+        # Make sure that the name of the decorated function remains the same.
+        inner.__name__ = f.__name__
+
+        return inner
+    return change_flags_exec
+
+
 def fetch_val_for_key(key):
     """Return the overriding config value for a key.
     A successful search returns a string value.
@@ -129,10 +165,10 @@ _config_var_list = []
 
 def _config_print(thing, buf):
     for cv in _config_var_list:
-        print >> buf, cv
-        print >> buf, "    Doc: ", cv.doc
-        print >> buf, "    Value: ", cv.__get__()
-        print >> buf, ""
+        print(cv, file=buf)
+        print("    Doc: ", cv.doc, file=buf)
+        print("    Value: ", cv.__get__(), file=buf)
+        print("", file=buf)
 
 
 def get_config_md5():
@@ -145,7 +181,7 @@ def get_config_md5():
     """
     all_opts = sorted([c for c in _config_var_list if c.in_c_key],
                       key=lambda cv: cv.fullname)
-    return theano.gof.cc.hash_from_code('\n'.join(
+    return theano.gof.utils.hash_from_code('\n'.join(
         ['%s = %s' % (cv.fullname, cv.__get__()) for cv in all_opts]))
 
 
@@ -273,11 +309,7 @@ class ConfigParam(object):
             try:
                 val_str = fetch_val_for_key(self.fullname)
             except KeyError:
-                if inspect.isgeneratorfunction(self.default):
-                    for v in self.default():
-                        val_str = v
-                        self.__set__(None, val_str)
-                elif callable(self.default):
+                if callable(self.default):
                     val_str = self.default()
                 else:
                     val_str = self.default
@@ -304,7 +336,7 @@ class EnumStr(ConfigParam):
 
         # All options should be strings
         for val in self.all:
-            if not isinstance(val, basestring):
+            if not isinstance(val, string_types):
                 raise ValueError('Valid values for an EnumStr parameter '
                                  'should be strings', val, type(val))
 

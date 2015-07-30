@@ -1,35 +1,35 @@
 """WRITEME
 """
+from __future__ import print_function
 import logging
-import warnings
-from textwrap import dedent
 
 import numpy
 
-import  theano
+import theano
 from theano import gof
 import theano.gof.vm
 from theano.configparser import config, AddConfigVar, StrParam
-from theano.compile.ops import register_view_op_c_code, _output_guard
+from theano.compile.ops import _output_guard
+from six import string_types
 
 
 _logger = logging.getLogger('theano.compile.mode')
 
 AddConfigVar('optimizer_excluding',
-        ("When using the default mode, we will remove optimizer with these "
-         "tags. Separate tags with ':'."),
-        StrParam("", allow_override=False),
-        in_c_key=False)
+             ("When using the default mode, we will remove optimizer with "
+              "these tags. Separate tags with ':'."),
+             StrParam("", allow_override=False),
+             in_c_key=False)
 AddConfigVar('optimizer_including',
-        ("When using the default mode, we will add optimizer with these tags. "
-         "Separate tags with ':'."),
-        StrParam("", allow_override=False),
-        in_c_key=False)
+             ("When using the default mode, we will add optimizer with "
+              "these tags. Separate tags with ':'."),
+             StrParam("", allow_override=False),
+             in_c_key=False)
 AddConfigVar('optimizer_requiring',
-        ("When using the default mode, we will require optimizer with these "
-         "tags. Separate tags with ':'."),
-        StrParam("", allow_override=False),
-        in_c_key=False)
+             ("When using the default mode, we will require optimizer with "
+              "these tags. Separate tags with ':'."),
+             StrParam("", allow_override=False),
+             in_c_key=False)
 
 
 def check_equal(x, y):
@@ -49,15 +49,15 @@ def check_equal(x, y):
         y = y.todense()
 
     if isinstance(x, numpy.ndarray) and isinstance(y, numpy.ndarray):
-        if (x.dtype != y.dtype
-                or x.shape != y.shape
-                or numpy.any(abs(x - y) > 1e-10)):
+        if (x.dtype != y.dtype or
+                x.shape != y.shape or
+                numpy.any(abs(x - y) > 1e-10)):
             raise Exception("Output mismatch.",
-                    {'performlinker': x, 'clinker': y})
+                            {'performlinker': x, 'clinker': y})
     else:
         if x != y:
             raise Exception("Output mismatch.",
-                    {'performlinker': x, 'clinker': y})
+                            {'performlinker': x, 'clinker': y})
 
 
 # If a string is passed as the linker argument in the constructor for
@@ -71,8 +71,7 @@ predefined_linkers = {
     'vm': gof.vm.VM_Linker(use_cloop=False),  # Use allow_gc Theano flag
     'cvm': gof.vm.VM_Linker(use_cloop=True),  # Use allow_gc Theano flag
     'vm_nogc': gof.vm.VM_Linker(allow_gc=False, use_cloop=False),
-    'cvm_nogc': gof.vm.VM_Linker(allow_gc=False, use_cloop=True),
-    }
+    'cvm_nogc': gof.vm.VM_Linker(allow_gc=False, use_cloop=True)}
 
 
 def register_linker(name, linker):
@@ -115,8 +114,7 @@ predefined_optimizers = {
     'fast_run': OPT_FAST_RUN,
     'fast_run_stable': OPT_FAST_RUN_STABLE,
     'fast_compile': OPT_FAST_COMPILE,
-    'stabilize': OPT_STABILIZE
-    }
+    'stabilize': OPT_STABILIZE}
 
 
 def register_optimizer(name, opt):
@@ -143,11 +141,11 @@ class AddDestroyHandler(gof.Optimizer):
         for o in fgraph.outputs:
             try:
                 fgraph.replace_validate(o, _output_guard(o),
-                        reason='output_guard')
+                                        reason='output_guard')
                 _logger.info("Output variable %s required output_guard, "
-                        "how was this output left unprotected against "
-                        "destructive operations?"
-                        % o)
+                             "how was this output left unprotected against "
+                             "destructive operations?"
+                             % o)
             except gof.InconsistencyError:
                 # This output is already impossible to destroy.
                 # No guard necessary
@@ -181,56 +179,56 @@ class PrintCurrentFunctionGraph(gof.Optimizer):
 
     def apply(self, fgraph):
         import theano.printing
-        print "PrintCurrentFunctionGraph:", self.header
+        print("PrintCurrentFunctionGraph:", self.header)
         theano.printing.debugprint(fgraph.outputs)
 
 
 optdb = gof.SequenceDB()
 optdb.register('merge1', gof.MergeOptimizer(),
-        0, 'fast_run', 'fast_compile', 'merge')
+               0, 'fast_run', 'fast_compile', 'merge')
 
 # rearranges elemwise expressions
 optdb.register('canonicalize', gof.EquilibriumDB(),
-        1, 'fast_run', 'fast_compile')
+               1, 'fast_run', 'fast_compile')
 
 optdb.register('merge1.2', gof.MergeOptimizer(),
-        1.2, 'fast_run', 'fast_compile', 'merge')
+               1.2, 'fast_run', 'fast_compile', 'merge')
 
 optdb.register('Print1.21', PrintCurrentFunctionGraph('Post-canonicalize'),
-        1.21,)  # 'fast_run', 'fast_compile')
+               1.21,)  # 'fast_run', 'fast_compile')
 
 # replace unstable subgraphs
 optdb.register('stabilize', gof.EquilibriumDB(),
-        1.5, 'fast_run')
+               1.5, 'fast_run')
 
 optdb.register('Print1.51', PrintCurrentFunctionGraph('Post-stabilize'),
-        1.51,)  # 'fast_run', 'fast_compile')
+               1.51,)  # 'fast_run', 'fast_compile')
 
 # misc special cases for speed
 optdb.register('specialize', gof.EquilibriumDB(),
-        2, 'fast_run', 'fast_compile_gpu')
+               2, 'fast_run', 'fast_compile_gpu')
 
 # misc special cases for speed that break canonicalization
 optdb.register('uncanonicalize', gof.EquilibriumDB(),
-        3, 'fast_run')
+               3, 'fast_run')
 
 # misc special cases for speed that are dependent on the device.
 optdb.register('specialize_device', gof.EquilibriumDB(),
-        48.6, 'fast_run')  # must be after gpu stuff at 48.5
+               48.6, 'fast_run')  # must be after gpu stuff at 48.5
 
 # especially constant merge
 optdb.register('merge2', gof.MergeOptimizer(),
-        49, 'fast_run', 'merge')
+               49, 'fast_run', 'merge')
 
 optdb.register('add_no_output_from_inplace', AddNoOutputFromInplace(),
-        49.4)
+               49.4)
 
 optdb.register('add_destroy_handler', AddDestroyHandler(),
-        49.5, 'fast_run', 'inplace')
+               49.5, 'fast_run', 'inplace')
 
 # final pass just to make sure
 optdb.register('merge3', gof.MergeOptimizer(),
-        100, 'fast_run', 'merge')
+               100, 'fast_run', 'merge')
 
 
 class Mode(object):
@@ -254,7 +252,7 @@ class Mode(object):
             linker = config.linker
         if optimizer is 'default':
             optimizer = config.optimizer
-        self.__setstate__((linker, optimizer))
+        Mode.__setstate__(self, (linker, optimizer))
 
         # self.provided_optimizer - typically the `optimizer` arg.
         # But if the `optimizer` arg is keyword corresponding to a predefined
@@ -272,10 +270,10 @@ class Mode(object):
         linker, optimizer = state
         self.provided_linker = linker
         self.provided_optimizer = optimizer
-        if isinstance(linker, basestring) or linker is None:
+        if isinstance(linker, string_types) or linker is None:
             linker = predefined_linkers[linker]
         self.linker = linker
-        if isinstance(optimizer, basestring) or optimizer is None:
+        if isinstance(optimizer, string_types) or optimizer is None:
             optimizer = predefined_optimizers[optimizer]
         if isinstance(optimizer, gof.Query):
             self.provided_optimizer = optimizer
@@ -286,7 +284,8 @@ class Mode(object):
 
     def __str__(self):
         return "%s(linker = %s, optimizer = %s)" % (self.__class__.__name__,
-                self.provided_linker, self.provided_optimizer)
+                                                    self.provided_linker,
+                                                    self.provided_optimizer)
 
     def __get_optimizer(self):
         if isinstance(self._optimizer, gof.Query):
@@ -297,33 +296,50 @@ class Mode(object):
     optimizer = property(__get_optimizer)
 
     def get_linker_optimizer(self, linker, optimizer):
-        if isinstance(linker, basestring) or linker is None:
+        if isinstance(linker, string_types) or linker is None:
             linker = predefined_linkers[linker]
-        if isinstance(optimizer, basestring) or optimizer is None:
+        if isinstance(optimizer, string_types) or optimizer is None:
             optimizer = predefined_optimizers[optimizer]
         return (linker, optimizer)
 
     def including(self, *tags):
         link, opt = self.get_linker_optimizer(self.provided_linker,
-                self.provided_optimizer)
+                                              self.provided_optimizer)
         # N.B. opt might be a Query instance, not sure what else it might be...
         #     string? Optimizer? OptDB? who knows???
         return self.__class__(linker=link, optimizer=opt.including(*tags))
 
     def excluding(self, *tags):
         link, opt = self.get_linker_optimizer(self.provided_linker,
-                self.provided_optimizer)
+                                              self.provided_optimizer)
         return self.__class__(linker=link, optimizer=opt.excluding(*tags))
 
     def requiring(self, *tags):
         link, opt = self.get_linker_optimizer(self.provided_linker,
-                self.provided_optimizer)
+                                              self.provided_optimizer)
         return self.__class__(linker=link, optimizer=opt.requiring(*tags))
+
+    def clone(self, link_kwargs=None, **kwargs):
+        """
+        Create a new instance of this Mode.
+
+        Keyword arguments can be provided for the linker,
+        in which case its `clone` method will be called with these
+        arguments.
+        """
+        new_linker = self.linker.clone(**link_kwargs)
+        new_optimizer = self.provided_optimizer
+        new_mode = type(self)(linker=new_linker,
+                              optimizer=new_optimizer)
+        return new_mode
+
 
 # If a string is passed as the mode argument in function or
 # FunctionMaker, the Mode will be taken from this dictionary using the
 # string as the key
-FAST_COMPILE = Mode('py', 'fast_compile')
+# Use VM_linker to allow lazy evaluation by default.
+FAST_COMPILE = Mode(theano.gof.vm.VM_Linker(use_cloop=False, c_thunks=False),
+                    'fast_compile')
 if theano.config.cxx:
     FAST_RUN = Mode('cvm', 'fast_run')
 else:
@@ -341,7 +357,7 @@ def get_mode(orig_string):
         string = config.mode
     else:
         string = orig_string
-    if not isinstance(string, basestring):
+    if not isinstance(string, string_types):
         return string  # it is hopefully already a mode...
 
     global instanciated_default_mode
@@ -359,14 +375,15 @@ def get_mode(orig_string):
     if string in ['Mode', 'ProfileMode', 'DebugMode']:
         if string == 'DebugMode':
             # need to import later to break circular dependency.
-            from debugmode import DebugMode
+            from .debugmode import DebugMode
             # DebugMode use its own linker.
             ret = DebugMode(optimizer=config.optimizer)
         else:
-            # The import is needed in case string is ProfileMode
-            from profilemode import ProfileMode, prof_mode_instance_to_print
-            ret = eval(string
-                    + '(linker=config.linker, optimizer=config.optimizer)')
+            # This might be required if the string is 'ProfileMode'
+            from .profilemode import ProfileMode  # noqa
+            from .profilemode import prof_mode_instance_to_print
+            ret = eval(string +
+                       '(linker=config.linker, optimizer=config.optimizer)')
     elif string in predefined_modes:
         ret = predefined_modes[string]
     else:

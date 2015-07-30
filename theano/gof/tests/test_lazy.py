@@ -1,11 +1,11 @@
+from __future__ import print_function
 from copy import deepcopy
 
 import numpy
 
 import theano
 from theano.gof.op import PureOp
-from theano.gof import Apply, generic, Container
-from theano.gof.link import LocalLinker, map_storage, add_clear_storage
+from theano.gof import Apply, generic
 from theano import function, Mode
 from theano.ifelse import ifelse
 import theano.tensor as T
@@ -159,9 +159,9 @@ def more_complex_test():
         except NotImplementedOp.E:
             pass
     else:
-        print f(1, 0, numpy.array(10, dtype=x1.dtype), 0)
+        print(f(1, 0, numpy.array(10, dtype=x1.dtype), 0))
         assert f(1, 0, numpy.array(10, dtype=x1.dtype), 0) == 20.5
-    print '... passed'
+    print('... passed')
 
 if __name__ == '__main__':
     more_complex_test()

@@ -1,4 +1,5 @@
-import cPickle, logging
+import logging
+import six.moves.cPickle as pickle
 
 _logger = logging.getLogger("theano.gof.callcache")
 
@@ -10,7 +11,7 @@ class CallCache(object):
             if filename is None:
                 raise IOError('bad filename')  # just goes to except
             f = open(filename, 'r')
-            self.cache = cPickle.load(f)
+            self.cache = pickle.load(f)
             f.close()
         except IOError:
             self.cache = {}
@@ -18,19 +19,13 @@ class CallCache(object):
     def persist(self, filename=None):
         if filename is None:
             filename = self.filename
-
-        # backport
-        #filename = self.filename if filename is None else filename
         f = open(filename, 'w')
-        cPickle.dump(self.cache, f)
+        pickle.dump(self.cache, f)
         f.close()
 
     def call(self, fn, args=(), key=None):
         if key is None:
             key = (fn, tuple(args))
-
-        # backport
-        #key = (fn, tuple(args)) if key is None else key
         if key not in self.cache:
             _logger.debug('cache miss %i', len(self.cache))
             self.cache[key] = fn(*args)
@@ -42,5 +37,5 @@ class CallCache(object):
         try:
             if self.filename:
                 self.persist()
-        except Exception, e:
+        except Exception as e:
             _logger.error('persist failed %s %s', self.filename, e)

@@ -5,13 +5,14 @@ import numpy
 from itertools import product
 
 import theano
-from theano.compat.six import StringIO
+from six import StringIO
 import theano.tensor as T
 import theano.tests.unittest_tools as utt
 from theano.sandbox.neighbours import images2neibs
 from theano.tensor.signal.downsample import max_pool_2d
 from theano.tensor.signal.downsample import DownsampleFactorMaxGrad
 import theano.sandbox.cuda.dnn as dnn
+from theano.sandbox.cuda.basic_ops import GpuAllocEmpty, gpu_alloc_empty
 
 # Skip test if cuda_ndarray is not available.
 import theano.sandbox.cuda as cuda
@@ -41,12 +42,122 @@ def test_dnn_conv_desc_merge():
     # CDataType is not DeepCopyable so this will crash if we don't use
     # borrow=True
     f = theano.function([], [theano.Out(desc1, borrow=True),
-                             theano.Out(desc2, borrow=True)])
+                             theano.Out(desc2, borrow=True)],
+                        mode=mode_with_gpu)
 
     d1, d2 = f()
 
     # This will be the case if they are merged, which would be bad.
     assert d1 != d2
+
+    desc1v2 = dnn.GpuDnnConvDesc(border_mode='valid', subsample=(2, 2),
+                                 conv_mode='conv')(img_shp, kern_shp)
+    f = theano.function([], [theano.Out(desc1, borrow=True),
+                             theano.Out(desc1v2, borrow=True)],
+                        mode=mode_with_gpu)
+    assert len([n for n in f.maker.fgraph.apply_nodes
+                if isinstance(n.op, dnn.GpuDnnConvDesc)]) == 1
+
+    # CDATA type don't equal even if they represent the same object
+    # So we can't use debugmode with it.
+    if theano.config.mode not in ["DebugMode", "DEBUG_MODE"]:
+        d1, d2 = f()
+
+        # They won't be equal if they aren't merged.
+        assert d1 == d2
+
+
+def test_dnn_conv_merge():
+    """This test that we merge correctly multiple dnn_conv.
+
+    This can is more difficult due to GpuEmptyAlloc that aren't
+    merged.
+
+    """
+    if not cuda.dnn.dnn_available():
+        raise SkipTest(cuda.dnn.dnn_available.msg)
+    img_shp = [2, 5, 6, 8]
+    kern_shp = [3, 5, 5, 6]
+    img = T.ftensor4('img')
+    kern = T.ftensor4('kern')
+    out = T.ftensor4('out')
+    desc = dnn.GpuDnnConvDesc(
+        border_mode='valid')(img.shape, kern.shape)
+
+    # Test forward op
+    o1 = dnn.dnn_conv(img, kern)
+    o2 = dnn.dnn_conv(img, kern)
+    f = theano.function([img, kern], [o1, o2], mode=mode_with_gpu)
+    d1, d2 = f(numpy.random.rand(*img_shp).astype('float32'),
+               numpy.random.rand(*kern_shp).astype('float32'))
+    topo = f.maker.fgraph.toposort()
+    assert len([n for n in topo if isinstance(n.op, dnn.GpuDnnConv)]) == 1
+
+    # Test grad w op
+    o1 = dnn.GpuDnnConvGradW()(img, kern, out, desc)
+    o2 = dnn.GpuDnnConvGradW()(img, kern, out, desc)
+    f = theano.function([img, kern, out], [o1, o2], mode=mode_with_gpu)
+    topo = f.maker.fgraph.toposort()
+    assert len([n for n in topo if isinstance(n.op, dnn.GpuDnnConvGradW)]) == 1
+
+    # Test grad i op
+    o1 = dnn.GpuDnnConvGradI()(img, kern, out, desc)
+    o2 = dnn.GpuDnnConvGradI()(img, kern, out, desc)
+    f = theano.function([img, kern, out], [o1, o2], mode=mode_with_gpu)
+    topo = f.maker.fgraph.toposort()
+    assert len([n for n in topo if isinstance(n.op, dnn.GpuDnnConvGradI)]) == 1
+
+
+def test_dnn_conv_inplace():
+    """This test that we have inplace work correctly even when
+    GpuAllocEmpty get merged together.
+
+    """
+    if not cuda.dnn.dnn_available():
+        raise SkipTest(cuda.dnn.dnn_available.msg)
+    img_shp = [2, 5, 6, 8]
+    kern_shp = [3, 5, 5, 6]
+    img = T.ftensor4('img')
+    kern = T.ftensor4('kern')
+    out = T.ftensor4('out')
+    desc1 = dnn.GpuDnnConvDesc(border_mode='valid', conv_mode='conv')(
+        img.shape, kern.shape)
+    desc2 = dnn.GpuDnnConvDesc(
+        border_mode='valid', conv_mode='cross')(img.shape, kern.shape)
+
+    # Test forward op
+    o1 = dnn.dnn_conv(img, kern, conv_mode='conv')
+    o2 = dnn.dnn_conv(img, kern, conv_mode='cross')
+    f = theano.function([img, kern], [o1, o2], mode=mode_with_gpu)
+    d1, d2 = f(numpy.random.rand(*img_shp).astype('float32'),
+               numpy.random.rand(*kern_shp).astype('float32'))
+    topo = f.maker.fgraph.toposort()
+    convs = [n for n in topo if isinstance(n.op, dnn.GpuDnnConv)]
+    assert len(convs) == 2
+    assert all([node.op.inplace for node in convs])
+    assert len([n for n in topo if isinstance(n.op, GpuAllocEmpty)]) == 2
+
+    # Test grad w op
+    out = gpu_alloc_empty(*kern.shape)
+    o1 = dnn.GpuDnnConvGradW()(img, kern, out, desc1)
+    o2 = dnn.GpuDnnConvGradW()(img, kern, out, desc2)
+    f = theano.function([img, kern], [o1, o2], mode=mode_with_gpu)
+    topo = f.maker.fgraph.toposort()
+    convs = [n for n in topo if isinstance(n.op, dnn.GpuDnnConvGradW)]
+    assert len(convs) == 2
+    assert all([node.op.inplace for node in convs])
+    assert len([n for n in topo if isinstance(n.op, GpuAllocEmpty)]) == 2
+
+    # Test grad i op
+    out = gpu_alloc_empty(*img.shape)
+    o1 = dnn.GpuDnnConvGradI()(img, kern, out, desc1)
+    o2 = dnn.GpuDnnConvGradI()(img, kern, out, desc2)
+    f = theano.function([img, kern], [o1, o2], mode=mode_with_gpu)
+    topo = f.maker.fgraph.toposort()
+    convs = [n for n in topo if isinstance(n.op, dnn.GpuDnnConvGradI)]
+    assert len(convs) == 2
+    assert all([node.op.inplace for node in convs])
+    assert len([n for n in topo if isinstance(n.op, GpuAllocEmpty)]) == 2
 
 
 def pool_2d_i2n(input, ds=(2, 2), strides=None,
@@ -89,8 +200,12 @@ def test_pooling():
         raise SkipTest(cuda.dnn.dnn_available.msg)
 
     x = T.ftensor4()
-    for func, pad in product((T.max, T.mean),
+    for mode, pad in product(('max', 'average_inc_pad', 'average_exc_pad'),
                              ((0, 0), (1, 0), (1, 0), (2, 3), (3, 2))):
+        if mode == 'max':
+            func = T.max
+        else:
+            func = T.mean
         if pad != (0, 0) and cuda.dnn.version() == -1:
             continue
 
@@ -101,29 +216,23 @@ def test_pooling():
             for stride in (2, 3):
                 if stride > ws:
                     continue
-                if func is T.max:
-                    if pad[0] > stride or pad[1] > stride:
-                        # Not implemented
-                        continue
-                    # We will check that the opt introduced it.
-                    out1 = max_pool_2d(x, (ws, ws),
-                                       st=(stride, stride),
-                                       ignore_border=True,
-                                       padding=pad)
-                else:
-                    out1 = cuda.dnn.dnn_pool(
-                        x, ws=(ws, ws),
-                        stride=(stride, stride),
-                        pad=pad,
-                        mode='max' if func is T.max else "average")
+                if pad[0] > stride or pad[1] > stride:
+                    # Not implemented
+                    continue
+                # We will check that the opt introduced it.
+                out1 = max_pool_2d(x, (ws, ws),
+                                   st=(stride, stride),
+                                   ignore_border=True,
+                                   padding=pad, mode=mode)
                 out2 = pool_2d_i2n(x, ds=(ws, ws), strides=(stride, stride),
                                    pad=pad,
                                    pool_function=func)
-
+                mode_without_gpu2 = mode_without_gpu.including()
+                mode_without_gpu2.check_isfinite = False
                 f1 = theano.function([x], out1, mode=mode_with_gpu)
                 assert any([isinstance(node.op, cuda.dnn.GpuDnnPool)
                             for node in f1.maker.fgraph.apply_nodes])
-                f2 = theano.function([x], out2, mode=mode_without_gpu)
+                f2 = theano.function([x], out2, mode=mode_without_gpu2)
                 assert not any([isinstance(node.op, cuda.dnn.GpuDnnPool)
                                 for node in f2.maker.fgraph.apply_nodes])
                 for shp in [(1, 10, 100, 100),
@@ -151,7 +260,7 @@ def test_pooling():
             # This test the CPU grad + opt + GPU implemtentation
             def fn(x):
                 return max_pool_2d(x, (ws, ws), ignore_border=True,
-                                   padding=pad)
+                                   padding=pad, mode=mode)
             theano.tests.unittest_tools.verify_grad(fn, [data],
                                                     cast_to_output_type=False,
                                                     mode=mode_with_gpu)
@@ -167,7 +276,7 @@ def test_pooling():
                     x, ws=(ws, ws),
                     stride=(stride, stride),
                     pad=pad,
-                    mode='max' if func is T.max else "average")
+                    mode=mode)
                 return dnn_op
             theano.tests.unittest_tools.verify_grad(
                 fn, [data],
@@ -180,17 +289,16 @@ def test_pooling():
                         for node in fg.maker.fgraph.toposort()])
             g_out = fg(data)
 
-            if func is T.max:
-                # Compare again the CPU result
-                out = max_pool_2d(x, (ws, ws),
-                                  padding=pad,
-                                  ignore_border=True)
-                fc = theano.function([x], theano.grad(out.sum(), x),
-                                     mode=mode_without_gpu)
-                assert any([isinstance(node.op, DownsampleFactorMaxGrad)
-                            for node in fc.maker.fgraph.toposort()])
-                c_out = fc(data)
-                assert numpy.allclose(c_out, g_out)
+            # Compare again the CPU result
+            out = max_pool_2d(x, (ws, ws),
+                              padding=pad,
+                              ignore_border=True, mode=mode)
+            fc = theano.function([x], theano.grad(out.sum(), x),
+                                 mode=mode_without_gpu)
+            assert any([isinstance(node.op, DownsampleFactorMaxGrad)
+                        for node in fc.maker.fgraph.toposort()])
+            c_out = fc(data)
+            assert numpy.allclose(c_out, g_out)
 
 
 def test_pooling_opt():
@@ -338,7 +446,6 @@ class TestDnnInferShapes(utt.InferShapeTester):
             numpy.random.rand(2, 1, 5, 6),
             dtype='float32'
         )
-        out_vals = numpy.zeros((3, 3, 1, 1), dtype='float32')
 
         for params in product(
             ['valid', 'full'],
@@ -385,7 +492,7 @@ class TestDnnInferShapes(utt.InferShapeTester):
             dtype='float32'
         )
         kern_vals = numpy.asarray(
-            numpy.random.rand(3, 4, 5, 6),
+            numpy.random.rand(13, 14, 15, 16),
             dtype='float32'
         )
 
@@ -430,7 +537,7 @@ class TestDnnInferShapes(utt.InferShapeTester):
         for params in product(
             [(1, 1), (2, 2), (3, 3)],
             [(1, 1), (2, 2), (3, 3)],
-            ['max', 'average']
+            ['max', 'average_inc_pad', 'average_exc_pad']
         ):
             desc = dnn.GpuDnnPoolDesc(
                 ws=params[0],
@@ -466,7 +573,7 @@ class TestDnnInferShapes(utt.InferShapeTester):
         for params in product(
             [(1, 1), (2, 2), (3, 3)],
             [(1, 1), (2, 2), (3, 3)],
-            ['max', 'average']
+            ['max', 'average_inc_pad']
         ):
             desc = dnn.GpuDnnPoolDesc(
                 ws=params[0],
@@ -500,7 +607,7 @@ def test_dnn_conv_border_mode():
     dnn.dnn_conv(img, kern, border_mode='valid')
 
 
-def test_dnn_conv_merge():
+def test_dnn_conv_alpha_output_merge():
     if not cuda.dnn.dnn_available():
         raise SkipTest(cuda.dnn.dnn_available.msg)
     img = T.ftensor4()
@@ -567,6 +674,55 @@ def test_dnn_conv_merge():
 
     for v1, v2 in zip(out_f1, out_f2):
         utt.assert_allclose(v1, v2)
+
+
+def test_dnn_conv_merge_mouts():
+    # make sure it doesn't attempt to output/alpha merge a convolution
+    # that has multiple clients.
+    if not cuda.dnn.dnn_available():
+        raise SkipTest(cuda.dnn.dnn_available.msg)
+    img = T.ftensor4()
+    kern = T.ftensor4()
+    out = T.ftensor4()
+
+    conv = dnn.dnn_conv(img, kern)
+
+    lr = numpy.asarray(0.05, dtype='float32')
+
+    if cuda.dnn.version() == -1:
+        # Can't merge alpha with cudnn v1
+        fr = conv + out
+    else:
+        fr = lr * (conv + out)
+    rr = conv * lr
+
+    f = theano.function([img, kern, out], [fr, rr], mode=mode_with_gpu)
+    convs = [n for n in f.maker.fgraph.toposort()
+             if isinstance(n.op, dnn.GpuDnnConv)]
+    assert len(convs) == 1
+
+
+def test_dnn_conv_merge_broad():
+    # Make sure that we don't apply output_merge on broadcasted values.
+    if not cuda.dnn.dnn_available():
+        raise SkipTest(cuda.dnn.dnn_available.msg)
+    img = T.ftensor4()
+    kern = T.ftensor4()
+
+    conv = dnn.dnn_conv(img, kern)
+
+    lr = numpy.asarray(0.05, dtype='float32')
+
+    # this does broadcasting
+    fr = conv + lr
+
+    f = theano.function([img, kern], [fr])
+    convs = [n for n in f.maker.fgraph.toposort()
+             if isinstance(n.op, dnn.GpuDnnConv)]
+    assert len(convs) == 1
+    conv = convs[0]
+    # Assert output was not merged
+    assert isinstance(conv.inputs[2].owner.op, GpuAllocEmpty)
 
 
 def test_dnn_conv_grad():

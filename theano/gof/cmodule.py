@@ -1,9 +1,11 @@
 """Generate and compile C modules for Python,
 """
+
+from __future__ import print_function
+
 import atexit
-import cPickle
+import six.moves.cPickle as pickle
 import logging
-import operator
 import os
 import re
 import shutil
@@ -15,21 +17,15 @@ import time
 import platform
 import distutils.sysconfig
 
-importlib = None
-try:
-    import importlib
-except ImportError:
-    pass
-
 import numpy.distutils  # TODO: TensorType should handle this
 
 import theano
-from theano.compat import PY3, next, decode, decode_iter
-from theano.compat.six import b, BytesIO, StringIO
+from theano.compat import PY3, decode, decode_iter
+from six import b, BytesIO, StringIO, string_types, iteritems
 from theano.gof.utils import flatten
 from theano.configparser import config
-from theano.gof.cc import hash_from_code
-from theano.misc.windows import (subprocess_Popen, call_subprocess_Popen,
+from theano.gof.utils import hash_from_code
+from theano.misc.windows import (subprocess_Popen,
                                  output_subprocess_Popen)
 
 # we will abuse the lockfile mechanism when reading and writing the registry
@@ -38,10 +34,17 @@ from theano.gof.compiledir import gcc_version_str, local_bitwidth
 
 from theano.configparser import AddConfigVar, BoolParam
 
-AddConfigVar('cmodule.mac_framework_link',
-        "If set to True, breaks certain MacOS installations with the infamous "
-        "Bus Error",
-        BoolParam(False))
+importlib = None
+try:
+    import importlib
+except ImportError:
+    pass
+
+AddConfigVar(
+    'cmodule.mac_framework_link',
+    "If set to True, breaks certain MacOS installations with the infamous "
+    "Bus Error",
+    BoolParam(False))
 
 AddConfigVar('cmodule.warn_no_version',
              "If True, will print a warning when compiling one or more Op "
@@ -92,7 +95,7 @@ def debug_counter(name, every=1):
     setattr(debug_counter, name, getattr(debug_counter, name, 0) + 1)
     n = getattr(debug_counter, name)
     if n % every == 0:
-        print >>sys.stderr, "debug_counter [%s]: %s" % (name, n)
+        print("debug_counter [%s]: %s" % (name, n), file=sys.stderr)
 
 
 class ExtFunction(object):
@@ -131,15 +134,16 @@ class ExtFunction(object):
         It goes into the DynamicModule's method table.
         """
         return '\t{"%s", %s, %s, "%s"}' % (
-                self.name, self.name, self.method, self.doc)
+            self.name, self.name, self.method, self.doc)
 
 
 class DynamicModule(object):
     def __init__(self, name=None):
-        assert name is None, ("The 'name' parameter of DynamicModule"
-                " cannot be specified anymore. Instead, 'code_hash'"
-                " will be automatically computed and can be used as"
-                " the module's name.")
+        assert name is None, (
+            "The 'name' parameter of DynamicModule"
+            " cannot be specified anymore. Instead, 'code_hash'"
+            " will be automatically computed and can be used as"
+            " the module's name.")
         # While the module is not finalized, we can call add_...
         # when it is finalized, a hash is computed and used instead of
         # the placeholder, and as module name.
@@ -149,19 +153,19 @@ class DynamicModule(object):
 
         self.support_code = []
         self.functions = []
-        self.includes = ["<Python.h>", "<iostream>"]
+        self.includes = ["<Python.h>", "<iostream>", '"theano_mod_helper.h"']
         self.init_blocks = []
 
     def print_methoddef(self, stream):
-        print >> stream, "static PyMethodDef MyMethods[] = {"
+        print("static PyMethodDef MyMethods[] = {", file=stream)
         for f in self.functions:
-            print >> stream, f.method_decl(), ','
-        print >> stream, "\t{NULL, NULL, 0, NULL}"
-        print >> stream, "};"
+            print(f.method_decl(), ',', file=stream)
+        print("\t{NULL, NULL, 0, NULL}", file=stream)
+        print("};", file=stream)
 
     def print_init(self, stream):
         if PY3:
-            print >> stream, """\
+            print("""\
 static struct PyModuleDef moduledef = {{
       PyModuleDef_HEAD_INIT,
       "{name}",
@@ -169,21 +173,21 @@ static struct PyModuleDef moduledef = {{
       -1,
       MyMethods,
 }};
-""".format(name=self.hash_placeholder)
-            print >> stream, ("PyMODINIT_FUNC PyInit_%s(void) {" %
-                              self.hash_placeholder)
+""".format(name=self.hash_placeholder), file=stream)
+            print(("PyMODINIT_FUNC PyInit_%s(void) {" %
+                  self.hash_placeholder), file=stream)
             for block in self.init_blocks:
-                print >> stream, '  ', block
-            print >> stream, "    PyObject *m = PyModule_Create(&moduledef);"
-            print >> stream, "    return m;"
+                print('  ', block, file=stream)
+            print("    PyObject *m = PyModule_Create(&moduledef);", file=stream)
+            print("    return m;", file=stream)
         else:
-            print >> stream, ("PyMODINIT_FUNC init%s(void){" %
-                              self.hash_placeholder)
+            print(("PyMODINIT_FUNC init%s(void){" %
+                  self.hash_placeholder), file=stream)
             for block in self.init_blocks:
-                print >> stream, '  ', block
-            print >> stream, '  ', ('(void) Py_InitModule("%s", MyMethods);'
-                                    % self.hash_placeholder)
-        print >> stream, "}"
+                print('  ', block, file=stream)
+            print('  ', ('(void) Py_InitModule("%s", MyMethods);'
+                  % self.hash_placeholder), file=stream)
+        print("}", file=stream)
 
     def add_include(self, str):
         assert not self.finalized
@@ -208,25 +212,25 @@ static struct PyModuleDef moduledef = {{
             if not inc:
                 continue
             if inc[0] == '<' or inc[0] == '"':
-                print >> sio, "#include", inc
+                print("#include", inc, file=sio)
             else:
-                print >> sio, '#include "%s"' % inc
+                print('#include "%s"' % inc, file=sio)
 
-        print >> sio, "//////////////////////"
-        print >> sio, "////  Support Code"
-        print >> sio, "//////////////////////"
+        print("//////////////////////", file=sio)
+        print("////  Support Code", file=sio)
+        print("//////////////////////", file=sio)
         for sc in self.support_code:
-            print >> sio, sc
+            print(sc, file=sio)
 
-        print >> sio, "//////////////////////"
-        print >> sio, "////  Functions"
-        print >> sio, "//////////////////////"
+        print("//////////////////////", file=sio)
+        print("////  Functions", file=sio)
+        print("//////////////////////", file=sio)
         for f in self.functions:
-            print >> sio, f.code_block
+            print(f.code_block, file=sio)
 
-        print >> sio, "//////////////////////"
-        print >> sio, "////  Module init"
-        print >> sio, "//////////////////////"
+        print("//////////////////////", file=sio)
+        print("////  Module init", file=sio)
+        print("//////////////////////", file=sio)
         self.print_methoddef(sio)
         self.print_init(sio)
 
@@ -242,7 +246,7 @@ static struct PyModuleDef moduledef = {{
     def list_code(self, ofile=sys.stdout):
         """Print out the code with line numbers to `ofile` """
         for i, line in enumerate(self.code().split('\n')):
-            print >> ofile, ('%4i' % (i + 1)), line
+            print(('%4i' % (i + 1)), line, file=ofile)
         ofile.flush()
 
     # TODO: add_type
@@ -351,9 +355,9 @@ def is_same_entry(entry_1, entry_2):
     if os.path.realpath(entry_1) == os.path.realpath(entry_2):
         return True
     if (os.path.basename(entry_1) == os.path.basename(entry_2) and
-        (os.path.basename(os.path.dirname(entry_1)) ==
-         os.path.basename(os.path.dirname(entry_2))) and
-        os.path.basename(os.path.dirname(entry_1)).startswith('tmp')):
+            (os.path.basename(os.path.dirname(entry_1)) ==
+             os.path.basename(os.path.dirname(entry_2))) and
+            os.path.basename(os.path.dirname(entry_1)).startswith('tmp')):
         return True
     return False
 
@@ -376,7 +380,7 @@ def get_module_hash(src_code, key):
     to_hash = [l.strip() for l in src_code.split('\n')]
     # Get the version part of the key (ignore if unversioned).
     if key[0]:
-        to_hash += map(str, key[0])
+        to_hash += list(map(str, key[0]))
     c_link_key = key[1]
     # Currently, in order to catch potential bugs early, we are very
     # convervative about the structure of the key and raise an exception
@@ -396,7 +400,7 @@ def get_module_hash(src_code, key):
             # This should be the C++ compilation command line parameters or the
             # libraries to link against.
             to_hash += list(key_element)
-        elif isinstance(key_element, basestring):
+        elif isinstance(key_element, string_types):
             if key_element.startswith('md5:'):
                 # This is the md5 hash of the config options. We can stop
                 # here.
@@ -429,8 +433,8 @@ def get_safe_part(key):
     # Find the md5 hash part.
     c_link_key = key[1]
     for key_element in c_link_key[1:]:
-        if (isinstance(key_element, basestring)
-                and key_element.startswith('md5:')):
+        if (isinstance(key_element, string_types) and
+                key_element.startswith('md5:')):
             md5 = key_element[4:]
             break
 
@@ -481,8 +485,8 @@ class KeyData(object):
         # Note that writing in binary mode is important under Windows.
         try:
             with open(self.key_pkl, 'wb') as f:
-                cPickle.dump(self, f, protocol=cPickle.HIGHEST_PROTOCOL)
-        except cPickle.PicklingError:
+                pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        except pickle.PicklingError:
             _logger.warning("Cache leak due to unpickle-able key data %s",
                             self.keys)
             os.remove(self.key_pkl)
@@ -510,7 +514,7 @@ class KeyData(object):
             del entry_from_key[key]
         if do_manual_check:
             to_del = []
-            for key, key_entry in entry_from_key.iteritems():
+            for key, key_entry in iteritems(entry_from_key):
                 if key_entry == entry:
                     to_del.append(key)
             for key in to_del:
@@ -721,7 +725,7 @@ class ModuleCache(object):
 
                     try:
                         with open(key_pkl, 'rb') as f:
-                            key_data = cPickle.load(f)
+                            key_data = pickle.load(f)
                     except EOFError:
                         # Happened once... not sure why (would be worth
                         # investigating if it ever happens again).
@@ -761,9 +765,9 @@ class ModuleCache(object):
                         # simpler to implement).
                         rmtree(root, ignore_nocleanup=True,
                                msg=(
-                                'invalid cache entry format -- this '
-                                'should not happen unless your cache '
-                                'was really old'),
+                                   'invalid cache entry format -- this '
+                                   'should not happen unless your cache '
+                                   'was really old'),
                                level=logging.WARN)
                         continue
 
@@ -845,14 +849,15 @@ class ModuleCache(object):
                                     get_safe_part(key),
                                     []).append(key)
                         else:
+                            dir1 = os.path.dirname(self.entry_from_key[key])
+                            dir2 = os.path.dirname(entry)
                             _logger.warning(
                                 "The same cache key is associated to "
                                 "different modules (%s and %s). This "
                                 "is not supposed to happen! You may "
                                 "need to manually delete your cache "
                                 "directory to fix this.",
-                                self.entry_from_key[key],
-                                entry)
+                                dir1, dir2)
                     # Clean up the name space to prevent bug.
                     if key_data.keys:
                         del key
@@ -868,7 +873,7 @@ class ModuleCache(object):
         del root, files, subdirs
 
         # Remove entries that are not in the filesystem.
-        items_copy = list(self.module_hash_to_key_data.iteritems())
+        items_copy = list(self.module_hash_to_key_data.items())
         for module_hash, key_data in items_copy:
             entry = key_data.get_entry()
             try:
@@ -956,12 +961,15 @@ class ModuleCache(object):
                 try:
                     key_data.add_key(key, save_pkl=bool(key[0]))
                     key_broken = False
-                except cPickle.PicklingError:
+                except pickle.PicklingError:
                     key_data.remove_key(key)
                     key_broken = True
-            if (key[0] and not key_broken and
-                self.check_for_broken_eq):
-                self.check_key(key, key_data.key_pkl)
+                # We need the lock while we check in case of parallel
+                # process that could be changing the file at the same
+                # time.
+                if (key[0] and not key_broken and
+                        self.check_for_broken_eq):
+                    self.check_key(key, key_data.key_pkl)
             self._update_mappings(key, key_data, module.__file__, check_in_keys=not key_broken)
             return module
         else:
@@ -1007,7 +1015,7 @@ class ModuleCache(object):
         if key[0]:
             try:
                 key_data.save_pkl()
-            except cPickle.PicklingError:
+            except pickle.PicklingError:
                 key_broken = True
                 key_data.remove_key(key)
                 key_data.save_pkl()
@@ -1045,8 +1053,6 @@ class ModuleCache(object):
         module = self._get_from_key(key)
         if module is not None:
             return module
-
-        lock_taken = False
 
         src_code = lnk.get_src_code()
         # Is the source code already in the cache?
@@ -1091,7 +1097,7 @@ class ModuleCache(object):
                 assert name not in self.module_from_name
                 self.module_from_name[name] = module
                 nocleanup = True
-            except OSError, e:
+            except OSError as e:
                 _logger.error(e)
                 if e.errno == 31:
                     _logger.error('There are %i files in %s',
@@ -1127,7 +1133,7 @@ class ModuleCache(object):
         for i in range(3):
             try:
                 with open(key_pkl, 'rb') as f:
-                    key_data = cPickle.load(f)
+                    key_data = pickle.load(f)
                 break
             except EOFError:
                 # This file is probably getting written/updated at the
@@ -1136,7 +1142,7 @@ class ModuleCache(object):
                 if i == 2:
                     with compilelock.lock_ctx():
                         with open(key_pkl, 'rb') as f:
-                            key_data = cPickle.load(f)
+                            key_data = pickle.load(f)
                 time.sleep(2)
 
         found = sum(key == other_key for other_key in key_data.keys)
@@ -1147,15 +1153,14 @@ class ModuleCache(object):
                 # This is to make debugging in pdb easier, by providing
                 # the offending keys in the local context.
                 # key_data_keys = list(key_data.keys)
-                ## import pdb; pdb.set_trace()
+                # import pdb; pdb.set_trace()
                 pass
         elif found > 1:
             msg = 'Multiple equal keys found in unpickled KeyData file'
         if msg:
             raise AssertionError(
-                    "%s. Verify the __eq__ and __hash__ functions of your "
-                    "Ops. The file is: %s. The key is: %s" %
-                    (msg, key_pkl, key))
+                "%s. Verify the __eq__ and __hash__ functions of your "
+                "Ops. The file is: %s. The key is: %s" % (msg, key_pkl, key))
         # Also verify that there exists no other loaded key that would be equal
         # to this key. In order to speed things up, we only compare to keys
         # with the same version part and config md5, since we can assume this
@@ -1193,10 +1198,10 @@ class ModuleCache(object):
         if age_thresh_del < self.age_thresh_use:
             if age_thresh_del > 0:
                 _logger.warning("Clearing modules that were not deemed "
-                        "too old to use: age_thresh_del=%d, "
-                        "self.age_thresh_use=%d",
-                        age_thresh_del,
-                        self.age_thresh_use)
+                                "too old to use: age_thresh_del=%d, "
+                                "self.age_thresh_use=%d",
+                                age_thresh_del,
+                                self.age_thresh_use)
             else:
                 _logger.info("Clearing all modules.")
             age_thresh_use = age_thresh_del
@@ -1208,8 +1213,8 @@ class ModuleCache(object):
             # processes and get all module that are too old to use
             # (not loaded in self.entry_from_key).
             too_old_to_use = self.refresh(
-                    age_thresh_use=age_thresh_use,
-                    delete_if_problem=delete_if_problem)
+                age_thresh_use=age_thresh_use,
+                delete_if_problem=delete_if_problem)
 
             for entry in too_old_to_use:
                 # TODO: we are assuming that modules that haven't been
@@ -1240,8 +1245,8 @@ class ModuleCache(object):
         """
         with compilelock.lock_ctx():
             self.clear_old(
-                    age_thresh_del=-1.0,
-                    delete_if_problem=delete_if_problem)
+                age_thresh_del=-1.0,
+                delete_if_problem=delete_if_problem)
             self.clear_unversioned(min_age=unversioned_min_age)
             if clear_base_files:
                 self.clear_base_files()
@@ -1289,7 +1294,7 @@ class ModuleCache(object):
             min_age = self.age_thresh_del_unversioned
 
         with compilelock.lock_ctx():
-            all_key_datas = self.module_hash_to_key_data.values()
+            all_key_datas = list(self.module_hash_to_key_data.values())
             for key_data in all_key_datas:
                 if not key_data.keys:
                     # May happen for broken versioned keys.
@@ -1331,7 +1336,7 @@ class ModuleCache(object):
                 if filename.startswith('tmp'):
                     try:
                         open(os.path.join(self.dirname, filename, 'key.pkl')
-                                ).close()
+                             ).close()
                         has_key = True
                     except IOError:
                         has_key = False
@@ -1387,7 +1392,7 @@ def _rmtree(parent, ignore_nocleanup=False, msg='', level=logging.DEBUG,
                 log_msg += ' (%s)' % msg
             _logger.log(level, '%s: %s', log_msg, parent)
             shutil.rmtree(parent)
-    except Exception, e:
+    except Exception as e:
         # If parent still exists, mark it for deletion by a future refresh()
         _logger.debug('In _rmtree, encountered exception: %s(%s)',
                       type(e), e)
@@ -1395,7 +1400,7 @@ def _rmtree(parent, ignore_nocleanup=False, msg='', level=logging.DEBUG,
             try:
                 _logger.info('placing "delete.me" in %s', parent)
                 open(os.path.join(parent, 'delete.me'), 'w').close()
-            except Exception, ee:
+            except Exception as ee:
                 _logger.warning("Failed to remove or mark cache directory %s "
                                 "for removal %s", parent, ee)
 
@@ -1418,8 +1423,8 @@ def get_module_cache(dirname, init_args=None):
                         'was created prior to this call')
     if _module_cache.dirname != dirname:
         _logger.warning("Returning module cache instance with different "
-                "dirname (%s) than you requested (%s)",
-                _module_cache.dirname, dirname)
+                        "dirname (%s) than you requested (%s)",
+                        _module_cache.dirname, dirname)
     return _module_cache
 
 
@@ -1445,7 +1450,8 @@ def std_include_dirs():
     py_plat_spec_inc = distutils.sysconfig.get_python_inc(plat_specific=True)
     python_inc_dirs = ([py_inc] if py_inc == py_plat_spec_inc
                        else [py_inc, py_plat_spec_inc])
-    return numpy_inc_dirs + python_inc_dirs
+    gof_inc_dir = os.path.abspath(os.path.dirname(__file__))
+    return numpy_inc_dirs + python_inc_dirs + [gof_inc_dir]
 
 
 def std_lib_dirs_and_libs():
@@ -1482,10 +1488,10 @@ def std_lib_dirs_and_libs():
 
             for f, lib in [('libpython27.a', 'libpython 1.2')]:
                 if not os.path.exists(os.path.join(libdir, f)):
-                    print ("Your Python version is from Canopy. " +
+                    print(("Your Python version is from Canopy. " +
                            "You need to install the package '" + lib +
                            "' from Canopy package manager."
-                           )
+                           ))
             libdirs = [
                 # Used in older Canopy
                 os.path.join(sys.prefix, 'libs'),
@@ -1494,12 +1500,12 @@ def std_lib_dirs_and_libs():
                              r'EGG-INFO\mingw\usr\x86_64-w64-mingw32\lib')]
             for f, lib in [('libmsvcr90.a',
                             'mingw 4.5.2 or 4.8.1-2 (newer could work)')]:
-                if not any([os.path.exists(os.path.join(libdir, f))
-                            for libdir in libdirs]):
-                    print ("Your Python version is from Canopy. " +
+                if not any([os.path.exists(os.path.join(tmp_libdir, f))
+                            for tmp_libdir in libdirs]):
+                    print(("Your Python version is from Canopy. " +
                            "You need to install the package '" + lib +
                            "' from Canopy package manager."
-                           )
+                           ))
             python_lib_dirs.insert(0, libdir)
         std_lib_dirs_and_libs.data = [libname], python_lib_dirs
 
@@ -1606,7 +1612,7 @@ class Compiler(object):
                         os.remove(exe_path)
                     if os.path.exists(exe_path + ".exe"):
                         os.remove(exe_path + ".exe")
-        except OSError, e:
+        except OSError as e:
             if err is None:
                 err = str(e)
             else:
@@ -1682,7 +1688,7 @@ class GCC_compiler(Compiler):
                     break
 
         if ('g++' not in theano.config.cxx and
-            'clang++' not in theano.config.cxx):
+                'clang++' not in theano.config.cxx):
             _logger.warn(
                 "OPTIMIZATION WARNING: your Theano flag `cxx` seems not to be"
                 " the g++ compiler. So we disable the compiler optimization"
@@ -1716,9 +1722,9 @@ class GCC_compiler(Compiler):
                     selected_lines = []
                     for line in lines:
                         if ("COLLECT_GCC_OPTIONS=" in line or
-                            "CFLAGS=" in line or
-                            "CXXFLAGS=" in line or
-                            "-march=native" in line):
+                                "CFLAGS=" in line or
+                                "CXXFLAGS=" in line or
+                                "-march=native" in line):
                             continue
                         elif "-march=" in line:
                             selected_lines.append(line.strip())
@@ -1802,9 +1808,9 @@ class GCC_compiler(Compiler):
                     for line in default_lines:
                         if line.startswith(part[0]):
                             part2 = [p for p in join_options(line.split())
-                                     if (not 'march' in p and
-                                         not 'mtune' in p and
-                                         not 'target-cpu' in p)]
+                                     if ('march' not in p and
+                                         'mtune' not in p and
+                                         'target-cpu' not in p)]
                             new_flags = [p for p in part if p not in part2]
                             # Replace '-target-cpu value', which is an option
                             # of clang, with '-march=value', for g++
@@ -1925,7 +1931,7 @@ class GCC_compiler(Compiler):
     @staticmethod
     def compile_str(module_name, src_code, location=None,
                     include_dirs=None, lib_dirs=None, libs=None,
-                    preargs=None, py_module=True):
+                    preargs=None, py_module=True, hide_symbols=True):
         """
         :param module_name: string (this has been embedded in the src_code
 
@@ -1947,6 +1953,10 @@ class GCC_compiler(Compiler):
 
         :param py_module: if False, compile to a shared library, but do not
             import it as a Python module.
+
+        :param hide_symbols: if True (the default) all symbols will be
+        hidden from the library symbol table (which means that other
+        objects can't use them.
 
         :returns: dynamically-imported python module of the compiled code.
             (unless py_module is False, in that case returns None.)
@@ -2002,19 +2012,26 @@ class GCC_compiler(Compiler):
         else:
             cmd.extend(preargs)
         cmd.extend('-I%s' % idir for idir in include_dirs)
+        if hide_symbols and sys.platform != 'win32':
+            # This has been available since gcc 4.0 so we suppose it
+            # is always available. We pass it here since it
+            # significantly reduces the size of the symbol table for
+            # the objects we want to share. This in turns leads to
+            # improved loading times on most platforms (win32 is
+            # different, as usual).
+            cmd.append('-fvisibility=hidden')
         cmd.extend(['-o', lib_filename])
         cmd.append(cppfilename)
         cmd.extend(['-L%s' % ldir for ldir in lib_dirs])
         cmd.extend(['-l%s' % l for l in libs])
-        #print >> sys.stderr, 'COMPILING W CMD', cmd
+        # print >> sys.stderr, 'COMPILING W CMD', cmd
         _logger.debug('Running cmd: %s', ' '.join(cmd))
 
         def print_command_line_error():
             # Print command line when a problem occurred.
-            print >> sys.stderr, (
-                    "Problem occurred during compilation with the "
-                    "command line below:")
-            print >> sys.stderr, ' '.join(cmd)
+            print(("Problem occurred during compilation with the "
+                   "command line below:"), file=sys.stderr)
+            print(' '.join(cmd), file=sys.stderr)
 
         try:
             p_out = output_subprocess_Popen(cmd)
@@ -2027,14 +2044,14 @@ class GCC_compiler(Compiler):
         status = p_out[2]
 
         if status:
-            print '==============================='
+            print('===============================')
             for i, l in enumerate(src_code.split('\n')):
                 # gcc put its messages to stderr, so we add ours now
-                print >> sys.stderr, '%05i\t%s' % (i + 1, l)
-            print '==============================='
+                print('%05i\t%s' % (i + 1, l), file=sys.stderr)
+            print('===============================')
             print_command_line_error()
             # Print errors just below the command line.
-            print compile_stderr
+            print(compile_stderr)
             # We replace '\n' by '. ' in the error message because when Python
             # prints the exception, having '\n' in the text makes it more
             # difficult to read.
@@ -2042,7 +2059,7 @@ class GCC_compiler(Compiler):
                             (status, compile_stderr.replace('\n', '. ')))
         elif config.cmodule.compilation_warning and compile_stderr:
             # Print errors just below the command line.
-            print compile_stderr
+            print(compile_stderr)
 
         if py_module:
             # touch the __init__ file

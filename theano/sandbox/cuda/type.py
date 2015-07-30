@@ -1,7 +1,8 @@
 """Provide CudaNdarrayType
 """
+from __future__ import print_function
 import os
-import copy_reg
+import six.moves.copyreg as copyreg
 import warnings
 
 import numpy
@@ -10,7 +11,7 @@ import theano
 from theano import Type, Variable
 from theano import tensor, config
 from theano import scalar as scal
-from theano.compat.six import StringIO
+from six import StringIO
 
 try:
     # We must do those import to be able to create the full doc when nvcc
@@ -296,7 +297,7 @@ class CudaNdarrayType(Type):
         sio = StringIO()
         fail = sub['fail']
         nd = self.ndim
-        print >> sio, """
+        print("""
         assert(py_%(name)s->ob_refcnt >= 2); // There should be at least one ref from the container object,
         // and one ref from the local scope.
 
@@ -305,9 +306,9 @@ class CudaNdarrayType(Type):
             //fprintf(stderr, "c_extract CNDA object w refcnt %%p %%i\\n", py_%(name)s, (py_%(name)s->ob_refcnt));
             %(name)s = (CudaNdarray*)py_%(name)s;
             //std::cerr << "c_extract " << %(name)s << '\\n';
-        """ % locals()
+        """ % locals(), file=sio)
         if(check_input):
-            print >> sio, """
+            print("""
                 if (%(name)s->nd != %(nd)s)
                 {
                     PyErr_Format(PyExc_RuntimeError,
@@ -317,10 +318,10 @@ class CudaNdarrayType(Type):
                     %(fail)s;
                 }
                 //std::cerr << "c_extract " << %(name)s << " nd check passed\\n";
-            """ % locals()
+            """ % locals(), file=sio)
             for i, b in enumerate(self.broadcastable):
                 if b and check_broadcast:
-                    print >> sio, """
+                    print("""
                 if (CudaNdarray_HOST_DIMS(%(name)s)[%(i)s] != 1)
                 {
                     PyErr_Format(PyExc_RuntimeError,
@@ -342,8 +343,8 @@ class CudaNdarrayType(Type):
                     %(fail)s;
                 }
                 //std::cerr << "c_extract " << %(name)s << "bcast check %(i)s passed\\n";
-                    """ % locals()
-            print >> sio, """
+                    """ % locals(), file=sio)
+            print("""
                 assert(%(name)s);
                 Py_INCREF(py_%(name)s);
             }
@@ -362,13 +363,13 @@ class CudaNdarrayType(Type):
                 %(fail)s;
             }
             //std::cerr << "c_extract done " << %(name)s << '\\n';
-            """ % locals()
+            """ % locals(), file=sio)
         else:
-            print >> sio, """
+            print("""
                 assert(%(name)s);
                 Py_INCREF(py_%(name)s);
             }
-            """ % locals()
+            """ % locals(), file=sio)
         # print sio.getvalue()
         return sio.getvalue()
 
@@ -545,7 +546,7 @@ def CudaNdarray_unpickler(npa):
     else:
         raise ImportError("Cuda not found. Cannot unpickle CudaNdarray")
 
-copy_reg.constructor(CudaNdarray_unpickler)
+copyreg.constructor(CudaNdarray_unpickler)
 
 
 def CudaNdarray_pickler(cnda):
@@ -553,5 +554,5 @@ def CudaNdarray_pickler(cnda):
 
 # In case cuda is not imported.
 if cuda is not None:
-    copy_reg.pickle(cuda.CudaNdarray, CudaNdarray_pickler,
+    copyreg.pickle(cuda.CudaNdarray, CudaNdarray_pickler,
                     CudaNdarray_unpickler)

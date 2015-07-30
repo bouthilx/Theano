@@ -1,3 +1,4 @@
+from __future__ import print_function
 import time
 import unittest
 
@@ -5,6 +6,7 @@ from theano.compile.pfunc import pfunc
 from theano import tensor
 
 import numpy
+from six.moves import xrange
 import theano
 import theano.tensor as T
 
@@ -172,7 +174,7 @@ def test_careduce():
             f_caused_value_error = False
             try:
                 f_out = f(val)
-            except ValueError, e:
+            except ValueError as e:
                 exc = e
                 f_caused_value_error = True
             except NotImplementedError:
@@ -184,23 +186,23 @@ def test_careduce():
             f2_caused_value_error = False
             try:
                 f2_out = f2(val)
-            except ValueError, e:
+            except ValueError as e:
                 exc2 = e
                 f2_caused_value_error = True
 
             if f_caused_value_error != f2_caused_value_error:
                 if f_caused_value_error:
-                    print 'f caused this value error:'
-                    print exc
+                    print('f caused this value error:')
+                    print(exc)
                 else:
-                    print 'f did not raise a value error, but should have'
+                    print('f did not raise a value error, but should have')
                 if f2_caused_value_error:
-                    print 'f2 caused this value error:'
-                    print exc2
+                    print('f2 caused this value error:')
+                    print(exc2)
                 else:
-                    print 'f should not have raised a value error'
-                print 'shape was: ', shape
-                print 'pattern was: ', pattern
+                    print('f should not have raised a value error')
+                print('shape was: ', shape)
+                print('pattern was: ', pattern)
                 assert False
 
             try:
@@ -229,7 +231,7 @@ def test_careduce():
             pat = tensor_pattern_to_gpu_pattern(shape, pattern)
 
             a = tensor.TensorType('float32', (False,) * len(shape))()
-            dim_pattern = range(len(shape))
+            dim_pattern = list(range(len(shape)))
             dim_pattern[0] = 1
             dim_pattern[1] = 0
             a = a.dimshuffle(dim_pattern)
@@ -303,7 +305,9 @@ def test_careduce():
 
 def test_flatten():
     x = cuda.fmatrix('x')
-    f = theano.function([x], x.flatten())
+    f = theano.function([x], x.flatten(), mode=mode_with_gpu)
+    assert any([node for node in f.maker.fgraph.toposort()
+                if isinstance(node.op, B.GpuFlatten)])
     assert len(f([[0., 0.], [0., 0.]]).shape) == 1
 
 
@@ -370,6 +374,11 @@ def test_reshape():
     except ValueError:
         pass
 
+    # Test zero dimensions are allowed
+    x = T.vector('x')
+    f_reshp = theano.function([x], x.reshape((0,100)), mode=mode_with_gpu)
+    assert f_reshp(numpy.ndarray((0,), dtype='float32')).shape == (0,100)
+
 
 def test_alloc_empty():
     # Test that we allocated correctly
@@ -379,7 +388,7 @@ def test_alloc_empty():
     assert out.shape == (2, 3)
     assert out.dtype == 'float32'
 
-    # Test that we do not merge them.
+    # Test that we merge them.
     f = theano.function([], [cuda.basic_ops.gpu_alloc_empty(2, 3),
                              cuda.basic_ops.gpu_alloc_empty(2, 3)])
     out = f()
@@ -388,7 +397,7 @@ def test_alloc_empty():
     assert out[1].shape == (2, 3)
     assert out[1].dtype == 'float32'
     assert len([node for node in f.maker.fgraph.apply_nodes
-                if isinstance(node.op, cuda.basic_ops.GpuAllocEmpty)]) == 2
+                if isinstance(node.op, cuda.basic_ops.GpuAllocEmpty)]) == 1
 
 
 def test_elemwise_empty():
@@ -417,7 +426,8 @@ def test_elemwise0():
     f = pfunc([b], [], updates=[(a, a + b)], mode=mode_with_gpu)
 
     # check that we work inplace.
-    assert f.maker.fgraph.toposort()[1].op.destroy_map.items() == [(0, [0])]
+    assert (list(f.maker.fgraph.toposort()[1].op.destroy_map.items())
+            == [(0, [0])])
 
     a0 = a.get_value() * 1.0
     f(numpy.ones((4, 4), dtype='float32'))
@@ -1064,7 +1074,7 @@ class T_subtensor(theano.tensor.tests.test_subtensor.T_subtensor):
             val = numpy.asarray(val)
             good = data[idx]
             self.assertTrue(val.ndim == data.ndim)
-            self.assertTrue(numpy.allclose(val, good), (val, good))
+            utt.assert_allclose(val, good)
 
             # Test with input strided
             t = self.adv_sub1()(n[::-1], idx)
@@ -1077,7 +1087,7 @@ class T_subtensor(theano.tensor.tests.test_subtensor.T_subtensor):
             val = numpy.asarray(val)
             good = data[::-1][idx]
             self.assertTrue(val.ndim == data.ndim)
-            self.assertTrue(numpy.allclose(val, good), (val, good))
+            utt.assert_allclose(val, good)
 
 
 def test_advinc_subtensor1():
@@ -1098,7 +1108,7 @@ def test_advinc_subtensor1():
         rval = f(yval)
         rep = xval.copy()
         rep[[0, 2]] += yval
-        assert numpy.allclose(rval, rep)
+        utt.assert_allclose(rval, rep)
 
 
 def test_inc_subtensor():
@@ -1116,8 +1126,8 @@ def test_inc_subtensor():
     assert sum([isinstance(node.op, cuda.GpuIncSubtensor) and
                 node.op.set_instead_of_inc == False
                 for node in f.maker.fgraph.toposort()]) == 1
-    assert numpy.allclose(f(xval, yval), [[1., 12., 13.],
-                                          [4., 15., 16.], [7., 18., 19.]])
+    utt.assert_allclose(f(xval, yval), [[1., 12., 13.],
+                                        [4., 15., 16.], [7., 18., 19.]])
 
 
 def test_set_subtensor():
@@ -1175,11 +1185,11 @@ def test_many_arg_elemwise():
                     if mode is mode_with_gpu:
                         assert any([isinstance(node.op, cuda.GpuElemwise)
                                     for node in f.maker.fgraph.apply_nodes])
-                    assert numpy.allclose(out, outputs[-1])
+                    utt.assert_allclose(out, outputs[-1])
 
                 results_gpu, results_cpu = outputs
 
-                assert numpy.allclose(results_gpu, results_cpu)
+                utt.assert_allclose(results_gpu, results_cpu)
 
 
 def test_duplicate_arg_elemwise():
@@ -1191,7 +1201,7 @@ def test_duplicate_arg_elemwise():
     Aval = numpy.random.RandomState([1, 2, 3]).randn(5, 5).astype('float32')
     Bval = Aval + Aval
 
-    assert numpy.allclose(Bval, f(Aval))
+    utt.assert_allclose(Bval, f(Aval))
 
 
 def test_shared_float32():
@@ -1230,7 +1240,7 @@ def test_gpueye():
                             B.as_cuda_ndarray_variable(out),
                             mode=mode_with_gpu)
         result = numpy.asarray(f(N, M))
-        assert numpy.allclose(result, numpy.eye(N, M_, dtype=dtype))
+        utt.assert_allclose(result, numpy.eye(N, M_, dtype=dtype))
         assert result.dtype == numpy.dtype(dtype)
         assert any([isinstance(node.op, B.GpuEye)
                     for node in f.maker.fgraph.toposort()])
@@ -1318,7 +1328,7 @@ def speed_adv_sub1():
         f = theano.function([vec], var[vec], mode=mode_with_gpu)
         for i in range(100):
             f(idx)
-        print "ProfileMode with batch size", batch_size
+        print("ProfileMode with batch size", batch_size)
         mode_with_gpu.print_summary()
 
 

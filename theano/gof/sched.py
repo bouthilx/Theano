@@ -1,5 +1,7 @@
+from collections import defaultdict
+from six import iteritems
 from theano.gof.graph import list_of_nodes
-from theano.compat import cmp, defaultdict
+from theano.compat import cmp
 
 # {{{ http://code.activestate.com/recipes/578231/ (r1)
 # Copyright (c) Oren Tirosh 2012
@@ -36,11 +38,12 @@ def memodict(f):
 
 def make_depends():
     @memodict
-    def depends((a, b)):
+    def depends(pair):
         """ Returns True if a depends on b """
-        return (any(bout in a.inputs for bout in b.outputs)
-                or any(depends((ainp.owner, b)) for ainp in a.inputs
-                       if ainp.owner))
+        a, b = pair
+        return (any(bout in a.inputs for bout in b.outputs) or
+                any(depends((ainp.owner, b)) for ainp in a.inputs
+                    if ainp.owner))
     return depends
 
 
@@ -103,7 +106,8 @@ def _toposort(edges):
     [2] http://en.wikipedia.org/wiki/Toposort#Algorithms
     """
     incoming_edges = reverse_dict(edges)
-    incoming_edges = dict((k, set(val)) for k, val in incoming_edges.items())
+    incoming_edges = dict((k, set(val))
+                          for k, val in iteritems(incoming_edges))
     S = set((v for v in edges if v not in incoming_edges))
     L = []
 
@@ -136,7 +140,7 @@ def posort(l, *cmps):
 
     >>> lower_tens = lambda a, b: a/10 - b/10 # prefer lower numbers div 10
     >>> prefer evens = lambda a, b: a%2 - b%2 # prefer even numbers
-    >>> posort(range(20), lower_tens, prefer_evens)
+    >>> posort(list(range(20)), lower_tens, prefer_evens)
     [0, 8, 2, 4, 6, 1, 3, 5, 7, 9, 16, 18, 10, 12, 14, 17, 19, 11, 13, 15]
 
     implemented with _toposort """
@@ -159,12 +163,12 @@ def posort(l, *cmps):
             for b in l:
                 assert not(b in comes_after[a] and a in comes_after[b])
 
-    for cmp in cmps:
+    for cmp_fn in cmps:
         for a in l:
             for b in l:
-                if cmp(a, b) < 0:  # a wants to come before b
+                if cmp_fn(a, b) < 0:  # a wants to come before b
                     # if this wouldn't cause a cycle and isn't already known
-                    if not b in comes_before[a] and not b in comes_after[a]:
+                    if b not in comes_before[a] and b not in comes_after[a]:
                         add_links(a, b)
     # check() # debug code
 

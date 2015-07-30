@@ -1,4 +1,4 @@
-import warnings
+from six.moves import xrange
 
 
 def render_string(string, sub):
@@ -15,7 +15,7 @@ def render_string(string, sub):
     """
     try:
         finalCode = string % sub
-    except Exception, E:
+    except Exception as E:
         # If unable to render the string, render longer and longer
         # initial substrings until we find the minimal initial substring
         # that causes an error
@@ -23,9 +23,10 @@ def render_string(string, sub):
         while i <= len(string):
             try:
                 finalCode = string[0:i] % sub
-            except Exception, F:
+            except Exception as F:
                 if str(F) == str(E):
-                    raise Exception(string[0:i]+"<<<< caused exception "+str(F))
+                    raise Exception(
+                        string[0:i] + "<<<< caused exception " + str(F))
             i += 1
         assert False
     return finalCode
@@ -34,7 +35,7 @@ def render_string(string, sub):
 def pretty_format(string):
     lines = string.split('\n')
 
-    lines = [ strip_leading_white_space(line) for line in lines ]
+    lines = [strip_leading_white_space(line) for line in lines]
 
     indent = 0
     for i in xrange(len(lines)):
@@ -42,7 +43,7 @@ def pretty_format(string):
         if indent < 0:
             indent = 0
         #
-        lines[i] = ('    '*indent) + lines[i]
+        lines[i] = ('    ' * indent) + lines[i]
         indent += lines[i].count('{')
     #
 

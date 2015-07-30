@@ -1,19 +1,17 @@
+from __future__ import print_function
+
 import logging
-import theano
 
-logger = logging.getLogger(__name__)
 import numpy
+from six.moves import xrange
 
+import theano
+from theano.tensor import as_tensor_variable
 from theano.gof import Op, Apply
-
-from theano.tensor import as_tensor_variable, dot, DimShuffle, Dot
-from theano.tensor.blas import Dot22
-from theano.tensor.opt import (register_stabilize,
-        register_specialize, register_canonicalize)
-from theano.gof import local_optimizer
-from theano.gof.opt import Optimizer
 from theano.gradient import DisconnectedType
 from theano.tensor import basic as tensor
+
+logger = logging.getLogger(__name__)
 
 
 class MatrixPinv(Op):
@@ -42,7 +40,9 @@ class MatrixPinv(Op):
         assert x.ndim == 2
         return Apply(self, [x], [x.type()])
 
-    def perform(self, node, (x,), (z, )):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (z,) = outputs
         z[0] = numpy.linalg.pinv(x).astype(x.dtype)
 
 pinv = MatrixPinv()
@@ -69,7 +69,9 @@ class MatrixInverse(Op):
         assert x.ndim == 2
         return Apply(self, [x], [x.type()])
 
-    def perform(self, node, (x,), (z, )):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (z,) = outputs
         z[0] = numpy.linalg.inv(x).astype(x.dtype)
 
     def grad(self, inputs, g_outputs):
@@ -134,11 +136,8 @@ class AllocDiag(Op):
     """
     Allocates a square matrix with the given vector as its diagonal.
     """
-    def __eq__(self, other):
-        return type(self) == type(other)
 
-    def __hash__(self):
-        return hash(type(self))
+    __props__ = ()
 
     def make_node(self, _x):
         x = as_tensor_variable(_x)
@@ -149,7 +148,9 @@ class AllocDiag(Op):
     def grad(self, inputs, g_outputs):
         return [extract_diag(g_outputs[0])]
 
-    def perform(self, node, (x,), (z,)):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (z,) = outputs
         if x.ndim != 1:
             raise TypeError(x)
         z[0] = numpy.diag(x)
@@ -166,16 +167,12 @@ class ExtractDiag(Op):
 
     :note: work on the GPU.
     """
+    __props__ = ("view",)
+
     def __init__(self, view=False):
         self.view = view
         if self.view:
             self.view_map = {0: [0]}
-
-    def __eq__(self, other):
-        return type(self) == type(other) and self.view == other.view
-
-    def __hash__(self):
-        return hash(type(self)) ^ hash(self.view)
 
     def make_node(self, _x):
         if not isinstance(_x, theano.Variable):
@@ -258,17 +255,22 @@ class Det(Op):
     """Matrix determinant
     Input should be a square matrix
     """
+
+    __props__ = ()
+
     def make_node(self, x):
         x = as_tensor_variable(x)
         assert x.ndim == 2
         o = theano.tensor.scalar(dtype=x.dtype)
         return Apply(self, [x], [o])
 
-    def perform(self, node, (x,), (z, )):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (z,) = outputs
         try:
             z[0] = numpy.asarray(numpy.linalg.det(x), dtype=x.dtype)
         except Exception:
-            print 'Failed to compute determinant', x
+            print('Failed to compute determinant', x)
             raise
 
     def grad(self, inputs, g_outputs):
@@ -298,7 +300,9 @@ class Eig(Op):
         v = theano.tensor.matrix(dtype=x.dtype)
         return Apply(self, [x], [w, v])
 
-    def perform(self, node, (x,), (w, v)):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (w, v) = outputs
         w[0], v[0] = [z.astype(x.dtype) for z in self._numop(x)]
 
     def infer_shape(self, node, shapes):
@@ -333,7 +337,9 @@ class Eigh(Eig):
         v = theano.tensor.matrix(dtype=x.dtype)
         return Apply(self, [x], [w, v])
 
-    def perform(self, node, (x,), (w, v)):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (w, v) = outputs
         w[0], v[0] = self._numop(x, self.UPLO)
 
     def grad(self, inputs, g_outputs):
@@ -413,8 +419,10 @@ class EighGrad(Op):
         N = x.shape[0]
         outer = numpy.outer
 
-        G = lambda n: sum(v[:, m] * V.T[n].dot(v[:, m]) / (w[n] - w[m])
-                          for m in xrange(N) if m != n)
+        def G(n):
+            return sum(v[:, m] * V.T[n].dot(v[:, m]) / (w[n] - w[m])
+                       for m in xrange(N) if m != n)
+
         g = sum(outer(v[:, n], v[:, n] * W[n] + G(n))
                 for n in xrange(N))
 
@@ -459,14 +467,18 @@ class QRFull(Op):
         x = as_tensor_variable(x)
         assert x.ndim == 2, "The input of qr function should be a matrix."
         q = theano.tensor.matrix(dtype=x.dtype)
-        r = theano.tensor.matrix(dtype=x.dtype)
+        if self.mode != 'raw':
+            r = theano.tensor.matrix(dtype=x.dtype)
+        else:
+            r = theano.tensor.vector(dtype=x.dtype)
+
         return Apply(self, [x], [q, r])
 
-    def perform(self, node, (x,), (q, r)):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (q, r) = outputs
         assert x.ndim == 2, "The input of qr function should be a matrix."
-
-        q[0], r[0] = self._numop(x,
-                                 self.mode)
+        q[0], r[0] = self._numop(x, self.mode)
 
 
 class QRIncomplete(Op):
@@ -487,7 +499,9 @@ class QRIncomplete(Op):
         q = theano.tensor.matrix(dtype=x.dtype)
         return Apply(self, [x], [q])
 
-    def perform(self, node, (x,), (q,)):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (q,) = outputs
         assert x.ndim == 2, "The input of qr function should be a matrix."
         q[0] = self._numop(x,
                            self.mode)
@@ -592,7 +606,9 @@ class SVD(Op):
         v = theano.tensor.matrix(dtype=x.dtype)
         return Apply(self, [x], [w, u, v])
 
-    def perform(self, node, (x,), (w, u, v)):
+    def perform(self, node, inputs, outputs):
+        (x,) = inputs
+        (w, u, v) = outputs
         assert x.ndim == 2, "The input of svd function should be a matrix."
         w[0], u[0], v[0] = self._numop(x,
                                        self.full_matrices,
@@ -619,25 +635,9 @@ def svd(a, full_matrices=1, compute_uv=1):
     return SVD(full_matrices, compute_uv)(a)
 
 
-def test_matrix_inverse_solve():
-    if not imported_scipy:
-        raise SkipTest("Scipy needed for the Solve op.")
-    A = theano.tensor.dmatrix('A')
-    b = theano.tensor.dmatrix('b')
-    node = matrix_inverse(A).dot(b).owner
-    [out] = inv_as_solve.transform(node)
-    assert isinstance(out.owner.op, Solve)
-
-
 class lstsq(Op):
-    def __eq__(self, other):
-        return type(self) == type(other)
 
-    def __hash__(self):
-        return hash(type(self))
-
-    def __str__(self):
-        return self.__class__.__name__
+    __props__ = ()
 
     def make_node(self, x, y, rcond):
         x = theano.tensor.as_tensor_variable(x)
@@ -648,9 +648,6 @@ class lstsq(Op):
                              theano.tensor.lscalar(), theano.tensor.dvector()])
 
     def perform(self, node, inputs, outputs):
-        x = inputs[0]
-        y = inputs[1]
-        rcond = inputs[2]
         zz = numpy.linalg.lstsq(inputs[0], inputs[1], inputs[2])
         outputs[0][0] = zz[0]
         outputs[1][0] = zz[1]
@@ -681,7 +678,7 @@ def norm(x, ord):
             return x[x.nonzero()].shape[0]
         else:
             try:
-                z = tensor.sum(abs(x**ord))**(1./ord)
+                z = tensor.sum(abs(x**ord))**(1. / ord)
             except TypeError:
                 raise ValueError("Invalid norm order for vectors.")
             return z

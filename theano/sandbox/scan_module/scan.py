@@ -42,19 +42,20 @@ __copyright__ = "(c) 2010, Universite de Montreal"
 __contact__ = "Razvan Pascanu <r.pascanu@gmail>"
 
 
-from itertools import izip
 import logging
 import numpy
+from six.moves import xrange
 
 from theano import gof
+from theano.compat import izip
 from theano.tensor import opt, TensorVariable
 from theano.tensor.sharedvar import TensorSharedVariable
 from theano import tensor
 from theano.scalar.sharedvar import shared as scalar_shared
 from theano.compile.pfunc import rebuild_collect_shared
 
-import scan_op
-import scan_utils
+from . import scan_op
+from . import scan_utils
 
 # Logging function for sending warning or info
 _logger = logging.getLogger('theano.scan_module.scan')
@@ -97,7 +98,7 @@ def scan(fn,
 
         The order of the sequences is the same as the one in the list
         `sequences` given to scan. The order of the outputs is the same
-        as the order of ``output_info``. For any sequence or output the
+        as the order of ``outputs_info``. For any sequence or output the
         order of the time slices is the same as the one in which they have
         been given as taps. For example if one writes the following :
 

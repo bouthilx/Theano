@@ -1,19 +1,22 @@
+from __future__ import print_function
 import sys, time
+from six import iteritems
 from theano.compile.pfunc import pfunc
 from theano import tensor
 
 import numpy
+from six.moves import xrange
 
 import theano.sandbox.cuda as tcn
 
 
 def compare_fns(fns, input, reps=10):
     times = {}
-    for implname, impl in fns.iteritems():
+    for implname, impl in iteritems(fns):
         try:
-            print 'TOPOSORT', implname
+            print('TOPOSORT', implname)
             for i, n in enumerate(impl.maker.fgraph.toposort()):
-                print i, n
+                print(i, n)
         except Exception:
             pass
         t0 = time.time()
@@ -25,8 +28,8 @@ def compare_fns(fns, input, reps=10):
 
 
 def showtimes(times):
-    for impl, dt in times.iteritems():
-        print impl, dt
+    for impl, dt in iteritems(times):
+        print(impl, dt)
 
 
 def cmp_sigmoids(shape):

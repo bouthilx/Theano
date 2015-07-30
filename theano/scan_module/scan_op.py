@@ -2,7 +2,50 @@
 This module provides the Scan Op
 
 See scan.py for details on scan
+
+
+Memory reuse in scan
+--------------------
+
+To reduce the number of memory allocations and copies associated with calling
+the inner function and recovering the outputs at every iteration, Scan uses a
+memory pre-allocation mechanism for some of its outputs. Instead of repeatedly
+calling the inner function and copying the outputs to designated locations,
+it tries to make the inner function write the outputs directly to the
+designated locations.
+
+This is achieved by initializing, at every iteration, the output storage
+of the inner function with references to previously allocated memory. Other
+than the code in the Python and Cython backends to do this and to ensure that
+the pre-allocated memory has been used, the memory pre-allocation mechanism
+relies on the following elements to work properly :
+- In make_thunk(), when compiling the inner function, the borrow flag must
+  be set to False for the inputs. This will prevent aliasing between the
+  inputs and the outputs of the inner function which could lead to invalid
+  results.
+- In make_thunk(), again, the borrow flag must be set to True for the outputs.
+  This will make Theano consider the output storages as persistent and make
+  Theano provide them as pre-allocated storage to the ops that compute the
+  outputs of the inner function instead of letting these ops allocate their
+  own output storage.
+- The ops that produce the outputs of the inner function must be prevented
+  from working inplace because if they do, they're not using the pre-allocated
+  storage. This is achieved by including the optimization
+  'add_no_output_from_inplace' to the compilation mode used by scan. It
+  prevents other optimizations from altering the graph such that outputs are
+  produced by inplace operations.
+- The ScanSaveMem optimization, whose goal is to limit the amount of memory
+  used by scan, needs to allocate buffers large enough to be able, at every
+  iteration, to simultaneously read the needed previous states and storing
+  the new states. Before the memory reuse feature, the buffers could be
+  smaller because, often, Scan only needed buffers large enough to read the
+  needed previous states. This is because all the outputs of the inner
+  function were computed before any of them was stored in the buffers. Now,
+  the outputs are stored as they are computed which means that, if the buffer
+  is too small, computing an output can overwrite an input that is still
+  needed to compute another output.
 """
+from __future__ import print_function
 
 __docformat__ = 'restructedtext en'
 __authors__ = ("Razvan Pascanu "
@@ -15,20 +58,22 @@ __contact__ = "Razvan Pascanu <r.pascanu@gmail>"
 import itertools
 import logging
 import time
-from itertools import izip
 
 import numpy
+from six import iteritems
+from six.moves import xrange
 
 import theano
 from theano.compat import exc_message
 from theano.compile import function, Param, Out
 from theano import compile, config, gradient, gof, tensor
 from theano.gof import PureOp, Apply
-from theano.gof.graph import io_toposort
-from theano.compat import OrderedDict
+from theano.gof.graph import io_connection_pattern
+from theano.compat import OrderedDict, izip
 from theano.tensor import TensorType
 from theano.tensor.opt import Shape_i
 from theano.gradient import grad_undefined, DisconnectedType, NullType
+from six import string_types
 from theano.compile.profiling import ScanProfileStats
 
 from theano.scan_module import scan_utils
@@ -43,6 +88,11 @@ from theano.configparser import AddConfigVar, BoolParam
 AddConfigVar('scan.allow_gc',
              "Allow/disallow gc inside of Scan (default: False)",
              BoolParam(False))
+
+AddConfigVar('scan.allow_output_prealloc',
+             "Allow/disallow memory preallocation for outputs inside of scan "
+             "(default: True)",
+             BoolParam(True))
 
 
 class Scan(PureOp):
@@ -123,32 +173,25 @@ class Scan(PureOp):
             self.output_types = self.output_types[:-1]
 
         mode_instance = compile.mode.get_mode(self.mode)
-        # if the default mode is used, and that mode is ProfileMode
-        # then we need to copy the mode otherwise the time for a given
-        # op will be counted multiple times
-        if (self.mode is None and
-            isinstance(mode_instance, compile.profilemode.ProfileMode)):
-            mode_instance = compile.profilemode.ProfileMode(
-                optimizer=mode_instance.provided_optimizer,
-                linker=mode_instance.linker.clone(allow_gc=self.allow_gc))
-            compile.profilemode.prof_mode_instance_to_print.append(
-                                                    mode_instance)
-            self.mode_instance = mode_instance
-            if self.name:
-                self.mode_instance.message = self.name + " sub profile"
-            else:
-                self.mode_instance.message = "Scan sub profile"
+        # Clone mode_instance, altering "allow_gc" for the linker,
+        # and adding a message if the mode is a ProfileMode.
+        if self.name:
+            message = self.name + " sub profile"
         else:
-            self.mode_instance = type(mode_instance)(
-                optimizer=mode_instance.provided_optimizer,
-                linker=mode_instance.linker.clone(allow_gc=self.allow_gc))
+            message = "Scan sub profile"
 
-        # Now that scan has its mode instance, we activate optimization
+        self.mode_instance = mode_instance.clone(
+            link_kwargs=dict(allow_gc=self.allow_gc),
+            message=message)
+
+        # Now that scan has its mode instance, if memory pre-allocation is
+        # activated for the outputs, we activate the optimization
         # add_no_output_from_inplace in this mode instance. This will prevent
         # Scan from producing outputs by means of inplace operations and
         # therefore allow it to pre-allocate memory storage for the outputs,
         # avoiding needless copies.
-        self.mode_instance = self.mode_instance.including(
+        if theano.config.scan.allow_output_prealloc:
+            self.mode_instance = self.mode_instance.including(
                                                 "add_no_output_from_inplace")
 
         if not hasattr(self, 'name') or self.name is None:
@@ -179,6 +222,11 @@ class Scan(PureOp):
             self._cmodule_key = gof.CLinker().cmodule_key_(local_fgraph, [])
             self._hash_inner_graph = hash(self._cmodule_key)
 
+        # Compute mappings between outer inputs, outer outputs, inner
+        # inputs and inner outputs to determine with variables are associated
+        # with the same states.
+        self.var_mappings = self.get_oinp_iinp_iout_oout_mappings()
+
     def validate_inner_graph(self):
         """ Perform some elementary validations on the inner graph to ensure
         that it is coherent.
@@ -187,14 +235,11 @@ class Scan(PureOp):
         # For every recurrent output, iterate over the associated inner
         # inputs and output and ensure that they have the same dtype
         nb_recurr_outputs = self.n_mit_mot + self.n_mit_sot + self.n_sit_sot
-        outer_iidx_from_outer_oidx = self.get_outer_iidx_from_outer_oidx_seq()
 
-        for outer_oidx in range(nb_recurr_outputs):
+        for outer_oidx in xrange(nb_recurr_outputs):
 
-            outer_iidx = outer_iidx_from_outer_oidx[outer_oidx]
-
-            inner_iidxs = self.get_inner_iidx_from_outer_iidx(outer_iidx)
-            inner_oidxs = self.get_inner_oidx_from_outer_oidx(outer_oidx)
+            inner_iidxs = self.var_mappings['inner_inp_from_outer_out'][outer_oidx]
+            inner_oidxs = self.var_mappings['inner_out_from_outer_out'][outer_oidx]
 
             for (inner_iidx, inner_oidx) in itertools.product(inner_iidxs,
                                                               inner_oidxs):
@@ -244,7 +289,7 @@ class Scan(PureOp):
                                     "that it shouldn't be the case")
 
             for out in self.outputs:
-                if isinstance(inp.type, GpuArrayType):
+                if isinstance(out.type, GpuArrayType):
                     raise TypeError("Inconsistency in the inner graph of "
                                     "scan '%s' : one of the outputs to the "
                                     "inner graph is of type GpuArrayType but "
@@ -253,13 +298,19 @@ class Scan(PureOp):
 
     def __setstate__(self, d):
         self.__dict__.update(d)
-        self.validate_inner_graph()
         if "allow_gc" not in self.__dict__:
             self.allow_gc = True
             self.info['allow_gc'] = True
         if not hasattr(self, 'gpua'):
             self.gpua = False
             self.info['gpua'] = False
+        if not hasattr(self, 'var_mappings'):
+            # Generate the mappings between inner and outer inputs and outputs
+            # if they haven't already been generated.
+            self.var_mappings = self.get_oinp_iinp_iout_oout_mappings()
+
+        # Ensure that the graph associated with the inner function is valid.
+        self.validate_inner_graph()
 
     def make_node(self, *inputs):
         """
@@ -674,15 +725,22 @@ class Scan(PureOp):
                   self.n_mit_sot +
                   self.n_sit_sot +
                   self.n_nit_sot)
-        wrapped_inputs = [Param(x, borrow=True) for x in self.inputs]
-        wrapped_outputs = [Out(x, borrow=False) for x in
-                           self.outputs[:slices]]
+        if theano.config.scan.allow_output_prealloc:
+            wrapped_inputs = [Param(x, borrow=False) for x in
+                              self.inputs]
+            wrapped_outputs = [Out(x, borrow=True) for x in
+                               self.outputs[:slices]]
+        else:
+            wrapped_inputs = [Param(x, borrow=True) for x in
+                              self.inputs]
+            wrapped_outputs = [Out(x, borrow=False) for x in
+                               self.outputs[:slices]]
         wrapped_outputs += self.outputs[slices:]
         profile = None
         if (theano.config.profile or
-            (isinstance(self.profile, (basestring, bool, int))
+            (isinstance(self.profile, (string_types, bool, int))
                                       and self.profile)):
-            if isinstance(self.profile, basestring):
+            if isinstance(self.profile, string_types):
                 profile = ScanProfileStats(name=self.profile)
             else:
                 profile = ScanProfileStats(name=self.name)
@@ -709,8 +767,8 @@ class Scan(PureOp):
                 d1 = numpy.max(cython_tap_array_len)
             d0 = len(self.tap_array)
             cython_tap_array = numpy.zeros((d0, d1), dtype='int32')
-            for _d0 in range(d0):
-                for _d1 in range(cython_tap_array_len[_d0]):
+            for _d0 in xrange(d0):
+                for _d1 in xrange(cython_tap_array_len[_d0]):
                     cython_tap_array[_d0, _d1] = self.tap_array[_d0][_d1]
             cython_mit_mot_out_nslices = \
                 numpy.asarray([len(x) for x in self.mit_mot_out_slices],
@@ -722,8 +780,8 @@ class Scan(PureOp):
             d0 = len(self.mit_mot_out_slices)
             cython_mit_mot_out_slices = numpy.zeros((d0, d1),
                                                       dtype='int32')
-            for _d0 in range(d0):
-                for _d1 in range(cython_mit_mot_out_nslices[_d0]):
+            for _d0 in xrange(d0):
+                for _d1 in xrange(cython_mit_mot_out_nslices[_d0]):
                     cython_mit_mot_out_slices[_d0, _d1] = \
                         self.mit_mot_out_slices[_d0][_d1]
 
@@ -739,7 +797,7 @@ class Scan(PureOp):
                 cython_destroy_map = [0 for x in xrange(len(node.outputs))]
             cython_destroy_map = numpy.asarray(cython_destroy_map,
                                                dtype='int32')
-            import scan_perform_ext
+            from . import scan_perform_ext
             p = lambda node, args, outs:\
                     scan_perform_ext.perform(
                         self.n_shared_outs,
@@ -1021,6 +1079,9 @@ class Scan(PureOp):
         other_args = args[offset:]
         input_storage = self.fn.input_storage
         output_storage = self.fn.output_storage
+        old_output_storage = [None] * len(output_storage)
+        old_output_data = [None] * len(output_storage)
+        output_reused = [None] * len(output_storage)
         fn = self.fn.fn
         offset = (self.n_seqs + sum(map(len, self.tap_array[:self.n_outs])) +
                     self.n_shared_outs)
@@ -1099,10 +1160,23 @@ class Scan(PureOp):
                 pdx = offset + self.n_shared_outs
                 output_storage[pdx].storage[0] = None
 
-            # 4.5. Keep a reference to the variables currently in the
-            # output_storage to be able to compare them with the actual
-            # outputs of the inner function after its execution
-            old_output_storage = [o.storage[0] for o in output_storage]
+            # 4.5. Keep a reference to the variables (ndarrays, CudaNdarrays,
+            # etc) currently in the output_storage to be able to compare them
+            # with the actual outputs of the inner function after its
+            # execution. Also keep pointers to their data to be able to detect
+            # cases where outputs reused the allocated object but alter the
+            # memory region they refer to.
+            for idx in xrange(len(output_storage)):
+
+                var = output_storage[idx].storage[0]
+                old_output_storage[idx] = var
+
+                if hasattr(var, 'gpudata'):
+                    old_output_data[idx] = var.gpudata
+                elif hasattr(var, 'data'):
+                    old_output_data[idx] = var.data
+                else:
+                    old_output_data[idx] = None
 
             # 5. compute outputs
             t0_fn = time.time()
@@ -1114,15 +1188,16 @@ class Scan(PureOp):
                     # this is a new vm-provided function or c linker
                     # they need this because the exception manipulation
                     # done by raise_with_op is not implemented in C.
-                    if hasattr(self.fn, 'thunks'):
+                    if hasattr(fn, 'thunks'):
                         # For the CVM
-                        gof.link.raise_with_op(self.fn.nodes[self.fn.position_of_error],
-                                               self.fn.thunks[self.fn.position_of_error])
+                        gof.link.raise_with_op(fn.nodes[fn.position_of_error],
+                                               fn.thunks[fn.position_of_error])
                     else:
                         # For the c linker
-                        # We don't have access from python to all the temps values
-                        # So for now, we just don't print the extra shapes/strides info
-                        gof.vm.raise_with_op(self.fn.nodes[self.fn.position_of_error])
+                        # We don't have access from python to all the
+                        # temps values So for now, we just don't print
+                        # the extra shapes/strides info
+                        gof.vm.raise_with_op(fn.nodes[fn.position_of_error])
                 else:
                     # old-style linkers raise their own exceptions
                     raise
@@ -1134,9 +1209,26 @@ class Scan(PureOp):
 
             # Check which of the pre-allocated outputs (if applicable) have
             # been reused by the inner function
-            output_reused = [old_output_storage[o] is
-                             output_storage[o].storage[0]
-                             for o in range(len(output_storage))]
+            for idx in xrange(len(output_storage)):
+                # If the storage map does not contain the same object, then
+                # the pre-allocated output has not been reused
+                new_var = output_storage[idx].storage[0]
+                if old_output_storage[idx] is new_var:
+
+                    # The pre-allocated output is only considered as having
+                    # been reused if it still points to the same data as it
+                    # did before the execution of the inner function
+                    if old_output_data[idx] is None:
+                        output_reused[idx] = False
+                    else:
+                        if hasattr(new_var, 'gpudata'):
+                            output_reused[idx] = (new_var.gpudata ==
+                                                  old_output_data[idx])
+                        elif hasattr(new_var, 'data'):
+                            output_reused[idx] = (new_var.data ==
+                                                  old_output_data[idx])
+                else:
+                    output_reused[idx] = False
 
             t_fn += dt_fn
             offset_out = 0
@@ -1191,7 +1283,7 @@ class Scan(PureOp):
                 outs[j][0] = output_storage[jout].storage[0]
 
             pos = [(idx + 1) % store for idx, store in
-                               itertools.izip(pos, store_steps)]
+                               izip(pos, store_steps)]
             i = i + 1
 
         # 6. Check if you need to re-order output buffers
@@ -1379,131 +1471,6 @@ class Scan(PureOp):
                     scan_outs.append((Shape_i(0)(o),) + x[1:])
         return scan_outs
 
-    def get_input_pos(self, output_index):
-        """ For a given ``output_index``, an index in the inner outputs of
-        scan, find a corresponding first index in the inner inputs of scan
-        """
-        ipos = self.n_seqs
-        opos = output_index
-        for otaps, itaps in zip(self.mitmot_out_taps(), self.mitmot_taps()):
-            if len(otaps) > opos:
-                return ipos
-            else:
-                opos = opos - len(otaps)
-                ipos += len(itaps)
-        for dx, taps in enumerate(self.mitsot_taps()):
-            if opos == 0:
-                return ipos
-            else:
-                opos = opos - 1
-                ipos += len(taps)
-        if opos < self.info['n_sit_sot']:
-            return ipos + opos
-        else:
-            return -1
-
-    def get_output_pos(self, input_index):
-        """ For a given ``input_index``, an index in the inner inputs of
-        scan, find a corresponding first index in the inner outputs of scan
-        """
-        ipos = input_index
-        opos = 0
-        for otaps, itaps in zip(self.mitmot_out_taps(), self.mitmot_taps()):
-            if len(itaps) > ipos:
-                return opos
-            else:
-                opos += len(otaps)
-                ipos -= len(itaps)
-        for dx, taps in enumerate(self.mitsot_taps()):
-            if len(taps) > ipos:
-                return opos
-            else:
-                opos += 1
-                ipos -= len(taps)
-        if ipos < self.info['n_sit_sot']:
-            return ipos + opos
-        else:
-            return -1
-
-    def get_output_slice_idx(self, output_index):
-        """ For an ``output_index``, an index in the outter ouputs of scan,
-        find a corresponding index in the inner outputs of scan.
-        """
-        ipos = 0
-        opos = output_index
-        for otaps in zip(self.mitmot_out_taps()):
-            if len(otaps) > 0:
-                return ipos
-            else:
-                opos = opos - 1
-                ipos += len(otaps)
-        return ipos + opos
-
-    def inner_connection_pattern(self):
-        """ Returns the connection pattern of scan's inner function
-        """
-
-        inner_nodes = io_toposort(self.inputs, self.outputs)
-
-        # Initialize 'connect_pattern_by_var' by establishing each input as
-        # connected only to itself
-        connect_pattern_by_var = {}
-        nb_inputs = len(self.inputs)
-        nb_outputs = len(self.outputs)
-
-        for i in range(nb_inputs):
-            input = self.inputs[i]
-            inp_connection_pattern = [i == j for j in range(nb_inputs)]
-            connect_pattern_by_var[input] = inp_connection_pattern
-
-        # Iterate through the nodes used to produce the outputs from the
-        # inputs and, for every node, infer their connection pattern to
-        # every input from the connection patterns of their parents.
-        for n in inner_nodes:
-
-            # Get the connection pattern of the inner node's op. If the op
-            # does not define a connection_pattern method, assume that
-            # every node output is connected to every node input
-            try:
-                op_connection_pattern = n.op.connection_pattern(n)
-            except AttributeError:
-                op_connection_pattern = ([[True] * len(n.outputs)] *
-                                         len(n.inputs))
-
-            # For every output of the inner node, figure out which inputs it
-            # is connected to by combining the connection pattern of the inner
-            # node and the connection patterns of the inner node's inputs.
-            for out_idx in range(len(n.outputs)):
-                out = n.outputs[out_idx]
-                out_connection_pattern = [False] * nb_inputs
-
-                for inp_idx in range(len(n.inputs)):
-                    inp = n.inputs[inp_idx]
-
-                    if inp in connect_pattern_by_var:
-                        inp_connection_pattern = connect_pattern_by_var[inp]
-
-                        # If the node output is connected to the node input, it
-                        # means it is connected to every inner input that the
-                        # node inputs is connected to
-                        if op_connection_pattern[inp_idx][out_idx]:
-                            out_connection_pattern = [out_connection_pattern[i] or
-                                                    inp_connection_pattern[i]
-                                                    for i in range(nb_inputs)]
-
-                # Store the connection pattern of the node output
-                connect_pattern_by_var[out] = out_connection_pattern
-
-        # Obtain the global connection pattern by combining the
-        # connnection patterns of the individual outputs
-        global_connection_pattern = [[] for o in range(len(self.inputs))]
-        for out in self.outputs:
-            out_connection_pattern = connect_pattern_by_var[out]
-            for i in range(len(self.inputs)):
-                global_connection_pattern[i].append(out_connection_pattern[i])
-
-        return global_connection_pattern
-
     def connection_pattern(self, node):
 
         # We cache the result of this function because, with a previous
@@ -1514,7 +1481,7 @@ class Scan(PureOp):
             return node.tag.connection_pattern
 
         # Obtain the connection pattern of the inner function.
-        inner_connect_pattern = self.inner_connection_pattern()
+        inner_connect_pattern = io_connection_pattern(self.inputs, self.outputs)
 
         # Initially assume no outer input is connected to any outer output
         connection_pattern = [[False for output in node.outputs]
@@ -1524,11 +1491,11 @@ class Scan(PureOp):
         # over every possible pairing of their corresponding inner inputs
         # and inner outputs and, if one such pair of inner variables is
         # connected than the pair of outer variables is connected.
-        for outer_oidx in range(len(node.outputs)):
-            inner_oidxs = self.get_inner_oidx_from_outer_oidx(outer_oidx)
+        for outer_oidx in xrange(len(node.outputs)):
+            inner_oidxs = self.var_mappings['inner_out_from_outer_out'][outer_oidx]
 
-            for outer_iidx in range(len(node.inputs)):
-                inner_iidxs = self.get_inner_iidx_from_outer_iidx(outer_iidx)
+            for outer_iidx in xrange(len(node.inputs)):
+                inner_iidxs = self.var_mappings['inner_inp_from_outer_inp'][outer_iidx]
 
                 for inner_oidx in inner_oidxs:
                     for inner_iidx in inner_iidxs:
@@ -1545,7 +1512,6 @@ class Scan(PureOp):
         # input to `z_t` then `x` is an input to `z_t`.
 
         n_outs = len(node.outputs)
-        outer_iidx_from_outer_oidx = self.get_outer_iidx_from_outer_oidx_seq()
 
         for steps in xrange(n_outs):
             for iidx in xrange(n_outs):
@@ -1553,7 +1519,7 @@ class Scan(PureOp):
 
                     # Get the idx of the outer input corresponding to that
                     # outer output
-                    j_inp_idx = outer_iidx_from_outer_oidx[jidx]
+                    j_inp_idx = self.var_mappings["outer_inp_from_outer_out"][jidx]
 
                     if j_inp_idx != -1:
                        if connection_pattern[j_inp_idx][iidx] == True:
@@ -1564,100 +1530,159 @@ class Scan(PureOp):
         node.tag.connection_pattern = connection_pattern
         return connection_pattern
 
-    def get_inner_oidx_from_outer_oidx(self, outer_oidx):
-        """Given the index of an outer output, return the indices of the
-        corresponding inner output(s) in a sequence.
+    def get_oinp_iinp_iout_oout_mappings(self):
+        """ Compute and return dictionary mappings between the inputs and
+        outputs of the inner function and the inputs and outputs of the Scan
+        node in the outer graph.
+
+        The return value is a dictionary in which the keys are the names of
+        the individual mappings and the values are the mapping dictionaries
+        themselves. In dictionaries representing mappings to outer variables,
+        the values are individual integer indices. In dictionaries
+        representing mappings to inner variables, the values are sequences of
+        indices because multiple inner variables can be associated with the
+        same state
         """
-        s = 0
-        e = 0
-        for p in xrange(outer_oidx + 1):
-            s = e
-            if p < self.n_mit_mot:
-                e += len(self.mitmot_out_taps()[p])
-            else:
-                e += 1
+        # Lists for outer variables contain individual indices, lists for
+        # inner variables contain sequences of indices because many inner
+        # variables can be associated with the same outer variable. The list
+        # and indices are initialized already containing the data associated
+        # with the timestep index, the first outer input.
+        outer_input_indices = [0]
+        inner_input_indices = [[]]
+        inner_output_indices = [[]]
+        outer_output_indices = [-1]
 
-        return range(s, e)
-
-    def get_inner_iidx_from_outer_iidx(self, outer_oidx):
-        """Given the index of an outer input, return the indices of the
-        corresponding inner input(s) in a sequence.
-        """
-        outer_iidx_from_inner_iidx = self.get_outer_iidx_from_inner_iidx_seq()
-
-        # For every inner input, if the corresponding outer input is the
-        # desired one, store the index
-        inner_iidxs = []
-        for i in xrange(len(outer_iidx_from_inner_iidx)):
-            if outer_iidx_from_inner_iidx[i] == outer_oidx:
-                inner_iidxs.append(i)
-
-        return inner_iidxs
-
-    def get_outer_iidx_from_outer_oidx_seq(self):
-        """ Return a sequence where the value at the i-th position is the
-        index of the outer input corresponding to the i-th outer output
-
-        NOTE: mitmots, mitsots, sitsots and shared outputs have corresponding
-        outer inputs but not nitsots.
-        """
-
-        nb_outer_outputs = (self.n_mit_mot + self.n_mit_sot + self.n_sit_sot +
-                            self.n_nit_sot + self.n_shared_outs)
-        result = [-1] * nb_outer_outputs
-
-        # Process mitmots, mitsots and sitsots
-        input_offset = 1 + self.n_seqs
-        output_offset = 0
-        for i in range(len(self.tap_array)):
-            result[output_offset] = input_offset
-            input_offset += 1
-            output_offset += 1
-
-        # Process shared inputs/outputs
-        output_offset += self.n_nit_sot
-        for i in range(self.n_shared_outs):
-            result[output_offset] = input_offset
-            input_offset += 1
-            output_offset += 1
-
-        return result
-
-    def get_outer_iidx_from_inner_iidx_seq(self):
-        """ Return a sequence where the value at the i-th position is the
-        index of the outer input corresponding to the i-th inner input
-        """
-
-        output = []
-        outer_inp_idx = 1  # First outer input is timestep index, skip it
+        outer_iidx = 1
+        inner_iidx = 0
+        inner_oidx = 0
+        outer_oidx = 0
 
         # Handle sequences inputs
-        for i in range(self.info['n_seqs']):
-            output.append(outer_inp_idx)
-            outer_inp_idx += 1
+        for i in xrange(self.info['n_seqs']):
+            outer_input_indices.append(outer_iidx)
+            inner_input_indices.append([inner_iidx])
+            inner_output_indices.append([])
+            outer_output_indices.append(-1)
 
-        # Handle mitmots, mitsots and sitsots inputs
-        for input_taps in self.info['tap_array']:
-            for tap in input_taps:
-                output.append(outer_inp_idx)
-            outer_inp_idx += 1
+            outer_iidx += 1
+            inner_iidx += 1
+            inner_oidx += 0
+            outer_oidx += 0
 
-        # Handle shared inputs
-        for i in range(self.info['n_shared_outs']):
-            output.append(outer_inp_idx)
-            outer_inp_idx += 1
+        # Handle mitmots, mitsots and sitsots variables
+        for i in xrange(len(self.info['tap_array'])):
+            nb_input_taps = len(self.info['tap_array'][i])
 
-        # No inner input corresponds to the outer nitsot inputs but they still
-        # need to be counted
-        outer_inp_idx += self.info['n_nit_sot']
+            if i < self.n_mit_mot:
+                nb_output_taps = len(self.mit_mot_out_slices[i])
+            else:
+                nb_output_taps = 1
 
-        # Handle non-sequences inputs
-        nb_nonseqs_inputs = len(self.inputs) - len(output)
-        for i in range(nb_nonseqs_inputs):
-            output.append(outer_inp_idx)
-            outer_inp_idx += 1
+            outer_input_indices.append(outer_iidx)
+            inner_input_indices.append(list(range(inner_iidx,
+                                                  inner_iidx + nb_input_taps)))
+            inner_output_indices.append(list(range(inner_oidx,
+                                                   inner_oidx + nb_output_taps)))
+            outer_output_indices.append(outer_oidx)
 
-        return output
+            outer_iidx += 1
+            inner_iidx += nb_input_taps
+            inner_oidx += nb_output_taps
+            outer_oidx += 1
+
+        # This is needed because, for outer inputs (and for outer inputs only)
+        # nitsots come *after* shared variables.
+        outer_iidx += self.info['n_shared_outs']
+
+        # Handle nitsots variables
+        for i in xrange(self.n_nit_sot):
+            outer_input_indices.append(outer_iidx)
+            inner_input_indices.append([])
+            inner_output_indices.append([inner_oidx])
+            outer_output_indices.append(outer_oidx)
+
+            outer_iidx += 1
+            inner_iidx += 0
+            inner_oidx += 1
+            outer_oidx += 1
+
+        # This is needed because, for outer inputs (and for outer inputs only)
+        # nitsots come *after* shared variables.
+        outer_iidx -= (self.info['n_shared_outs'] + self.n_nit_sot)
+
+        # Handle shared states
+        for i in xrange(self.info['n_shared_outs']):
+            outer_input_indices.append(outer_iidx)
+            inner_input_indices.append([inner_iidx])
+            inner_output_indices.append([inner_oidx])
+            outer_output_indices.append(outer_oidx)
+
+            outer_iidx += 1
+            inner_iidx += 1
+            inner_oidx += 1
+            outer_oidx += 1
+
+        # This is needed because, for outer inputs (and for outer inputs only)
+        # nitsots come *after* shared variables.
+        outer_iidx += self.n_nit_sot
+
+        # Handle non-sequence inputs
+        # Note : the number of non-sequence inputs is not stored in self.info
+        # so it has to be inferred from the number of inner inputs that remain
+        # to be handled
+        for i in xrange(len(self.inputs) - inner_iidx):
+            outer_input_indices.append(outer_iidx)
+            inner_input_indices.append([inner_iidx])
+            inner_output_indices.append([])
+            outer_output_indices.append(-1)
+
+            outer_iidx += 1
+            inner_iidx += 1
+            inner_oidx += 0
+            outer_oidx += 0
+
+        # With the global mapping inferred, the individual mappings
+        # can be produced
+        mappings = {"outer_inp_from_outer_out" : {},
+                    "inner_inp_from_outer_out" : {},
+                    "inner_out_from_outer_out" : {},
+                    "inner_inp_from_outer_inp" : {},
+                    "inner_out_from_outer_inp" : {},
+                    "outer_out_from_outer_inp" : {},
+                    "outer_inp_from_inner_inp" : {},
+                    "inner_out_from_inner_inp" : {},
+                    "outer_out_from_inner_inp" : {},
+                    "outer_inp_from_inner_out" : {},
+                    "inner_inp_from_inner_out" : {},
+                    "outer_out_from_inner_out" : {}}
+
+        for (oinp, iinp, iout, oout) in izip(outer_input_indices,
+                                             inner_input_indices,
+                                             inner_output_indices,
+                                             outer_output_indices):
+
+            if oout != -1:
+                mappings["outer_inp_from_outer_out"][oout] = oinp
+                mappings["inner_inp_from_outer_out"][oout] = iinp
+                mappings["inner_out_from_outer_out"][oout] = iout
+
+            if oinp != -1:
+                mappings["inner_inp_from_outer_inp"][oinp] = iinp
+                mappings["inner_out_from_outer_inp"][oinp] = iout
+                mappings["outer_out_from_outer_inp"][oinp] = oout
+
+            for idx in iinp:
+                mappings["outer_inp_from_inner_inp"][idx] = oinp
+                mappings["inner_out_from_inner_inp"][idx] = iout
+                mappings["outer_out_from_inner_inp"][idx] = oout
+
+            for idx in iout:
+                mappings["outer_inp_from_inner_out"][idx] = oinp
+                mappings["inner_inp_from_inner_out"][idx] = iinp
+                mappings["outer_out_from_inner_out"][idx] = oout
+
+        return mappings
 
     # GRAD FUNCTION
     def grad(self, inputs, dC_douts):
@@ -1756,7 +1781,7 @@ class Scan(PureOp):
                         consider_constant=wrt,
                         disconnected_inputs='ignore',
                         return_disconnected='None')
-                except gradient.NullTypeGradError, e:
+                except gradient.NullTypeGradError as e:
                     # The gradient wrt that particular input is undefined.
                     # This is not necessarily an issue, because maybe that
                     # particular input is not in the path between the
@@ -1805,10 +1830,14 @@ class Scan(PureOp):
 
                 for pos, inp in enumerate(states):
                     if inp in theano.gof.graph.inputs([Xt]):
-                        oidx = self.get_output_pos(pos)
-                        if not isinstance(dC_douts[oidx].type,
+                        # Get the index of the outer output that to which
+                        # the state variable 'inp' corresponds.
+                        outer_oidx = self.var_mappings['outer_out_from_inner_inp'][self.n_seqs +
+                                                                                   pos]
+
+                        if not isinstance(dC_douts[outer_oidx].type,
                                           DisconnectedType):
-                            dtypes.append(dC_douts[oidx].dtype)
+                            dtypes.append(dC_douts[outer_oidx].dtype)
                 if dtypes:
                     new_dtype = theano.scalar.upcast(*dtypes)
                 else:
@@ -1852,14 +1881,25 @@ class Scan(PureOp):
         # construct dX_dtm1
         dC_dXtm1s = []
         for pos, x in enumerate(dC_dinps_t[self.n_seqs:]):
-            opos = self.get_output_pos(pos)
-            if opos >= 0:
+
+            # Get the index of the first inner input corresponding to the
+            # pos-ieth inner input state
+            idxs = self.var_mappings['inner_out_from_inner_inp'][self.n_seqs +
+                                                                 pos]
+
+            # Check if the pos-th input is associated with one of the
+            # recurrent states
+            x_is_state = pos < sum([len(t) for t in self.tap_array])
+
+            if x_is_state and len(idxs) > 0:
+                opos = idxs[0]
                 dC_dXtm1s.append(safe_new(dC_dXts[opos]))
                 if hasattr(x, 'dtype') and x.dtype != dC_dXts[opos].dtype:
                     dC_dinps_t[pos + self.n_seqs] = \
                             x.astype(dC_dXts[opos].dtype)
             else:
                 dC_dXtm1s.append(safe_new(x))
+
         for dx, dC_dXtm1 in enumerate(dC_dXtm1s):
             if isinstance(dC_dinps_t[dx + self.n_seqs].type, NullType):
                 # The accumulated gradient is undefined
@@ -2527,15 +2567,15 @@ def profile_printer(fct_name, compile_time, fct_call_time, fct_call,
     # Scan overhead profile
     if any([isinstance(node.op, Scan) and v > 0 for (_, node), v in
             apply_time.items()]):
-        print
-        print 'Scan overhead:'
+        print()
+        print('Scan overhead:')
         print ('<Scan op time(s)> <sub scan fct time(s)> <sub scan op '
                'time(s)> <sub scan fct time(% scan op time)> <sub scan '
                'op time(% scan op time)> <node>')
         total_super_scan_time = 0
         total_scan_fct_time = 0
         total_scan_op_time = 0
-        for (_, node), v in apply_time.items():
+        for (_, node), v in iteritems(apply_time):
             if isinstance(node.op, Scan):
                 if v > 0:
                     scan_fct_time = node.op.mode_instance.fn_time
@@ -2543,18 +2583,18 @@ def profile_printer(fct_name, compile_time, fct_call_time, fct_call,
                     total_super_scan_time += v
                     total_scan_fct_time += scan_fct_time
                     total_scan_op_time += scan_op_time
-                    print '    %5.1fs  %5.1fs  %5.1fs  %5.1f%%  %5.1f%%' % (
+                    print('    %5.1fs  %5.1fs  %5.1fs  %5.1f%%  %5.1f%%' % (
                         v,
                         scan_fct_time,
                         scan_op_time,
                         scan_fct_time / v * 100,
-                        scan_op_time / v * 100), node
+                        scan_op_time / v * 100), node)
                 else:
-                    print (' The node took 0s, so we can not '
-                           'compute the overhead'), node
-        print '    total %5.1fs  %5.1fs  %5.1fs  %5.1f%%  %5.1f%%' % (
+                    print((' The node took 0s, so we can not '
+                           'compute the overhead'), node)
+        print('    total %5.1fs  %5.1fs  %5.1fs  %5.1f%%  %5.1f%%' % (
             total_super_scan_time,
             total_scan_fct_time,
             total_scan_op_time,
             total_scan_fct_time / total_super_scan_time * 100,
-            total_scan_op_time / total_super_scan_time * 100)
+            total_scan_op_time / total_super_scan_time * 100))

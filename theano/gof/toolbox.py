@@ -1,9 +1,12 @@
+from __future__ import print_function
+from functools import partial
 import sys
 import time
+import inspect
 
 import theano
 from theano import config
-from theano.compat import partial, OrderedDict
+from theano.compat import OrderedDict
 from theano.gof import graph
 
 
@@ -31,7 +34,7 @@ class Feature(object):
     by various operations on FunctionGraphs. It can be used to enforce
     graph properties at all stages of graph optimization.
 
-    See toolbox and ext modules for common extensions.
+    See :func:`theano.gof.toolbox` for common extensions.
     """
 
     def on_attach(self, function_graph):
@@ -125,7 +128,7 @@ class LambdExtract:
 
     def __call__(self):
         return self.fgraph.change_input(self.node, self.i, self.r,
-                                    reason=("Revert", self.reason))
+                                        reason=("Revert", self.reason))
 
 
 class History(Feature):
@@ -198,7 +201,27 @@ class Validator(Feature):
 
     def validate_(self, fgraph):
         t0 = time.time()
-        ret = fgraph.execute_callbacks('validate')
+        try:
+            ret = fgraph.execute_callbacks('validate')
+        except Exception as e:
+            cf = inspect.currentframe()
+            uf = cf.f_back
+            uf_info = inspect.getframeinfo(uf)
+
+            # If the caller is replace_all_validate, just raise the
+            # exception. replace_all_validate will print out the
+            # verbose output.
+            # Or it has to be done here before raise.
+            if uf_info.function == 'replace_all_validate':
+                raise
+            else:
+                verbose = uf.f_locals.get('verbose', False)
+                if verbose:
+                    r = uf.f_locals.get('r', "")
+                    reason = uf_info.function
+                    print("validate failed on node %s.\n Reason: %s, %s" %
+                          (r, reason, e))
+                raise
         t1 = time.time()
         if fgraph.profile:
             fgraph.profile.validate_time += t1 - t0
@@ -213,10 +236,10 @@ class Validator(Feature):
 
 
 class ReplaceValidate(History, Validator):
-    pickle_rm_attr = ["replace_validate", "replace_all_validate",
-                      "replace_all_validate_remove"] + \
-                      History.pickle_rm_attr + Validator.pickle_rm_attr
-        
+    pickle_rm_attr = (["replace_validate", "replace_all_validate",
+                       "replace_all_validate_remove"] +
+                      History.pickle_rm_attr + Validator.pickle_rm_attr)
+
     def on_attach(self, fgraph):
         for attr in ('replace_validate', 'replace_all_validate',
                      'replace_all_validate_remove'):
@@ -254,23 +277,27 @@ class ReplaceValidate(History, Validator):
         for r, new_r in replacements:
             try:
                 fgraph.replace(r, new_r, reason=reason, verbose=False)
-            except Exception, e:
-                if ('The type of the replacement must be the same' not in
-                    str(e) and 'does not belong to this FunctionGraph' not in str(e)):
+            except Exception as e:
+                msg = str(e)
+                s1 = 'The type of the replacement must be the same'
+                s2 = 'does not belong to this FunctionGraph'
+                if (s1 not in msg and s2 not in msg):
                     out = sys.stderr
-                    print >> out, "<<!! BUG IN FGRAPH.REPLACE OR A LISTENER !!>>",
-                    print >> out, type(e), e, reason
+                    print("<<!! BUG IN FGRAPH.REPLACE OR A LISTENER !!>>",
+                          type(e), e, reason, file=out)
                 # this might fail if the error is in a listener:
                 # (fgraph.replace kinda needs better internal error handling)
                 fgraph.revert(chk)
                 raise
         try:
             fgraph.validate()
-        except Exception, e:
+        except Exception as e:
             fgraph.revert(chk)
+            if verbose:
+                print("validate failed on node %s.\n Reason: %s, %s" % (r, reason, e))
             raise
         if verbose:
-            print reason, r, new_r
+            print(reason, r, new_r)
         return chk
 
     def replace_all_validate_remove(self, fgraph, replacements,
@@ -285,14 +312,15 @@ class ReplaceValidate(History, Validator):
                 fgraph.revert(chk)
                 if warn:
                     out = sys.stderr
-                    print >> out, (
+                    print(
                         "WARNING: An optimization wanted to replace a Variable"
                         " in the graph, but the replacement for it doesn't"
                         " remove it. We disabled the optimization."
                         " Your function runs correctly, but it would be"
                         " appreciated if you submit this problem to the"
-                        " mailing list theano-users so that we can fix it.")
-                    print >> out, reason, replacements
+                        " mailing list theano-users so that we can fix it.",
+                        file=out)
+                    print(reason, replacements, file=out)
                 raise ReplacementDidntRemovedError()
 
     def __getstate__(self):
@@ -310,7 +338,8 @@ class NodeFinder(Bookkeeper):
 
     def on_attach(self, fgraph):
         if self.fgraph is not None:
-            raise Exception("A NodeFinder instance can only serve one FunctionGraph.")
+            raise Exception("A NodeFinder instance can only serve one "
+                            "FunctionGraph.")
         if hasattr(fgraph, 'get_nodes'):
             raise AlreadyThere("NodeFinder is already present or in conflict"
                                " with another plugin.")
@@ -331,12 +360,12 @@ class NodeFinder(Bookkeeper):
             self.d.setdefault(node.op, []).append(node)
         except TypeError:  # node.op is unhashable
             return
-        except Exception, e:
-            print >> sys.stderr, 'OFFENDING node', type(node), type(node.op)
+        except Exception as e:
+            print('OFFENDING node', type(node), type(node.op), file=sys.stderr)
             try:
-                print >> sys.stderr, 'OFFENDING node hash', hash(node.op)
+                print('OFFENDING node hash', hash(node.op), file=sys.stderr)
             except Exception:
-                print >> sys.stderr, 'OFFENDING node not hashable'
+                print('OFFENDING node not hashable', file=sys.stderr)
             raise e
 
     def on_prune(self, fgraph, node, reason):
@@ -365,24 +394,24 @@ class PrintListener(Feature):
 
     def on_attach(self, fgraph):
         if self.active:
-            print "-- attaching to: ", fgraph
+            print("-- attaching to: ", fgraph)
 
     def on_detach(self, fgraph):
         if self.active:
-            print "-- detaching from: ", fgraph
+            print("-- detaching from: ", fgraph)
 
     def on_import(self, fgraph, node, reason):
         if self.active:
-            print "-- importing: %s, reason: %s" % (node, reason)
+            print("-- importing: %s, reason: %s" % (node, reason))
 
     def on_prune(self, fgraph, node, reason):
         if self.active:
-            print "-- pruning: %s, reason: %s" % (node, reason)
+            print("-- pruning: %s, reason: %s" % (node, reason))
 
     def on_change_input(self, fgraph, node, i, r, new_r, reason=None):
         if self.active:
-            print "-- changing (%s.inputs[%s]) from %s to %s" % (
-                node, i, r, new_r)
+            print("-- changing (%s.inputs[%s]) from %s to %s" % (
+                node, i, r, new_r))
 
 
 class PreserveNames(Feature):
@@ -407,7 +436,7 @@ class NoOutputFromInplace(Feature):
             node = out.owner
             op = node.op
             out_idx = node.outputs.index(out)
-            if hasattr(op, 'destroy_map') and out_idx in op.destroy_map.keys():
+            if hasattr(op, 'destroy_map') and out_idx in op.destroy_map:
                 raise theano.gof.InconsistencyError(
                     "A function graph Feature has requested (probably for ",
                     "efficiency reasons for scan) that outputs of the graph",

@@ -1,6 +1,8 @@
 import unittest
-from itertools import izip
+from theano.compat import izip
 from copy import copy, deepcopy
+
+from six import iteritems
 
 import numpy
 import theano
@@ -12,7 +14,6 @@ from theano.tensor.basic import alloc
 from theano.tensor.tests import test_basic
 from theano.tensor.tests.test_basic import rand, safe_make_node
 from theano.tests.unittest_tools import SkipTest
-from numpy.testing.noseclasses import KnownFailureTest
 
 import theano.sandbox.gpuarray
 
@@ -40,6 +41,7 @@ from ..type import (GpuArrayType,
 from ..basic_ops import (
     host_from_gpu, gpu_from_host,
     gpu_alloc, GpuAlloc,
+    GpuAllocEmpty,
     gpu_from_cuda,
     cuda_from_gpu, HostFromGpu,
     GpuContiguous,
@@ -68,9 +70,9 @@ def may_fail(msg, EClass):
         def wrapper():
             try:
                 f()
-            except Exception, e:
+            except Exception as e:
                 if isinstance(e, EClass):
-                    raise KnownFailureTest(msg, e)
+                    raise SkipTest(msg, e)
                 raise
         wrapper.__name__ = f.__name__
         return wrapper
@@ -103,7 +105,7 @@ def rand_gpuarray(*shape, **kwargs):
     dtype = kwargs.pop('dtype', theano.config.floatX)
     cls = kwargs.pop('cls', None)
     if len(kwargs) != 0:
-        raise TypeError('Unexpected argument %s', kwargs.keys()[0])
+        raise TypeError('Unexpected argument %s', list(kwargs.keys())[0])
     return gpuarray.array(r, dtype=dtype, cls=cls)
 
 
@@ -132,7 +134,7 @@ def makeTester(name, op, gpu_op, cases, checks=None, mode_gpu=mode_with_gpu,
             if skip:
                 raise SkipTest(skip)
 
-            for testname, inputs in cases.items():
+            for testname, inputs in iteritems(cases):
                 self.run_case(testname, inputs)
 
         def run_case(self, testname, inputs):
@@ -142,7 +144,7 @@ def makeTester(name, op, gpu_op, cases, checks=None, mode_gpu=mode_with_gpu,
             try:
                 node_ref = safe_make_node(self.op, *inputs_ref)
                 node_tst = safe_make_node(self.op, *inputs_tst)
-            except Exception, exc:
+            except Exception as exc:
                 err_msg = ("Test %s::%s: Error occured while making "
                            "a node with inputs %s") % (self.gpu_op, testname,
                                                        inputs)
@@ -152,7 +154,7 @@ def makeTester(name, op, gpu_op, cases, checks=None, mode_gpu=mode_with_gpu,
             try:
                 f_ref = inplace_func([], node_ref.outputs, mode=mode_nogpu)
                 f_tst = inplace_func([], node_tst.outputs, mode=mode_gpu)
-            except Exception, exc:
+            except Exception as exc:
                 err_msg = ("Test %s::%s: Error occured while trying to "
                            "make a Function") % (self.gpu_op, testname)
                 exc.args += (err_msg,)
@@ -163,12 +165,12 @@ def makeTester(name, op, gpu_op, cases, checks=None, mode_gpu=mode_with_gpu,
             ref_e = None
             try:
                 expecteds = f_ref()
-            except Exception, exc:
+            except Exception as exc:
                 ref_e = exc
 
             try:
                 variables = f_tst()
-            except Exception, exc:
+            except Exception as exc:
                 if ref_e is None:
                     err_msg = ("Test %s::%s: exception when calling the "
                                "Function") % (self.gpu_op, testname)
@@ -199,7 +201,7 @@ def makeTester(name, op, gpu_op, cases, checks=None, mode_gpu=mode_with_gpu,
                             self.op, testname, i, inputs, expected,
                             expected.dtype, variable, variable.dtype))
 
-            for description, check in self.checks.items():
+            for description, check in iteritems(self.checks):
                 if not check(inputs, variables):
                     self.fail(("Test %s::%s: Failed check: %s "
                                "(inputs were %s, ouputs were %s)") %
@@ -302,11 +304,30 @@ GpuAllocTester = makeTester(
 )
 
 
-class TestAlloc(theano.tensor.tests.test_basic.TestAlloc):
+class TestAlloc(test_basic.TestAlloc):
     dtype = "float32"
     mode = mode_with_gpu
     shared = staticmethod(gpuarray_shared_constructor)
     allocs = [GpuAlloc(), GpuAlloc(), T.Alloc()]
+
+
+def test_alloc_empty():
+    for dt in ['float32', 'int8']:
+        f = theano.function([], GpuAllocEmpty(dt)(2, 3))
+        assert len(f.maker.fgraph.apply_nodes) == 1
+        out = f()
+        assert out.shape == (2, 3)
+        assert out.dtype == dt
+
+    f = theano.function([], [GpuAllocEmpty('uint64')(3, 2),
+                             GpuAllocEmpty('uint64')(3, 2)])
+    out = f()
+    assert out[0].shape == (3, 2)
+    assert out[0].dtype == 'uint64'
+    assert out[1].shape == (3, 2)
+    assert out[1].dtype == 'uint64'
+    assert len([node for node in f.maker.fgraph.apply_nodes
+                if isinstance(node.op, GpuAllocEmpty)]) == 1
 
 
 def test_shape():
@@ -361,6 +382,14 @@ class G_reshape(test_basic.T_reshape):
                          theano.tensor.opt.Shape_i,
                          theano.tensor.opt.MakeVector))
         assert self.op == GpuReshape
+
+
+class G_comparison(test_basic.test_comparison):
+    def setUp(self):
+        utt.seed_rng()
+        self.mode = mode_with_gpu
+        self.shared = gpuarray_shared_constructor
+        self.dtypes = ['float64', 'float32']
 
 
 class G_Join_and_Split(test_basic.T_Join_and_Split):
@@ -436,7 +465,7 @@ def test_gpueye():
         assert any([isinstance(node.op, GpuEye)
                     for node in f.maker.fgraph.toposort()])
 
-    for dtype in ['float32', 'int32']:
+    for dtype in ['float32', 'int32', 'float16']:
         yield check, dtype, 3
         # M != N, k = 0
         yield check, dtype, 3, 5

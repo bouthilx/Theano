@@ -1,4 +1,3 @@
-from itertools import izip
 import logging
 import sys
 import unittest
@@ -6,10 +5,11 @@ import unittest
 from nose.plugins.skip import SkipTest
 from nose.plugins.attrib import attr
 import numpy
+from six import StringIO
+from six.moves import xrange
 
 import theano
-from theano.compat import exc_message
-from theano.compat.six import StringIO
+from theano.compat import exc_message, izip, PY3
 from theano.compile import DeepCopyOp
 from theano import config
 from theano import gof
@@ -34,6 +34,13 @@ from theano.tensor import (as_tensor_variable, _shared,
                            fmatrix, dmatrix, lmatrix, matrix,
                            ctensor3, dtensor4)
 from theano.tensor.tests.test_basic import rand, randint_ranged, inplace_func
+
+if PY3:
+    def L(i):
+        return i
+else:
+    def L(i):
+        return long(i)
 
 
 class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
@@ -109,7 +116,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         n = self.shared(numpy.ones((), dtype=self.dtype))
         try:
             t = n[0]
-        except ValueError, e:
+        except ValueError as e:
             self.assertTrue(hasattr(e, 'subtensor_invalid'))
             return
         self.fail()
@@ -130,7 +137,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         try:
             try:
                 self.eval_output_and_check(t)
-            except IndexError, e:
+            except IndexError as e:
                 return
             self.fail()
         finally:
@@ -140,7 +147,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         n = self.shared(numpy.ones(3, dtype=self.dtype))
         try:
             t = n[slice(0, slice(1, 2, None), None)]
-        except Exception, e:
+        except Exception as e:
             # Relax constraint on the type of Exception,
             # since this might be handled by AvancedSubtensor
             # if e[0] != Subtensor.e_indextype:
@@ -177,7 +184,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         n = self.shared(numpy.ones(1, dtype=self.dtype))
         try:
             t = n[0, 0]
-        except ValueError, e:
+        except ValueError as e:
             self.assertTrue(hasattr(e, 'subtensor_invalid'))
             return
         self.fail()
@@ -303,7 +310,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
 
     def test_long(self):
         n = self.shared(numpy.arange(12, dtype=self.dtype).reshape((4, 3)))
-        t = n[1L:4L:2L, 1L]
+        t = n[L(1):L(4):L(2), L(1)]
         self.assertTrue(isinstance(t.owner.op, Subtensor))
         tval = self.eval_output_and_check(t)
         self.assertTrue(tval.shape == (2,))
@@ -313,7 +320,13 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         # Currently, we cast Python longs to int64 when used for indexing.
         # This test checks that using a long that does not fit raises an error.
         n = self.shared(numpy.arange(12, dtype=self.dtype).reshape((4, 3)))
-        self.assertRaises(Exception, lambda: n[:(2L ** 63)])
+        self.assertRaises(Exception, lambda: n[:L(2 ** 63)])
+
+    def test_list_slice(self):
+        x = theano.tensor.arange(100).reshape((5, 5, 4))
+        res = x[[slice(1, -1)] * x.ndim].eval()
+        x = numpy.arange(100).reshape((5, 5, 4))
+        numpy.allclose(res, x[[slice(1, -1)] * x.ndim])
 
     def test_newaxis(self):
         """
@@ -424,7 +437,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
 
     def test_ok_list(self):
         for data, idx in [(rand(4), [1, 0]),
-                          (rand(4, 5), [2, 3]),
+                          (rand(4, 5), [2, 3, -1]),
                           (rand(4, 2, 3), [0, 3]),
                           (rand(4, 2, 3), [3, 3, 1, 1, 2, 2, 0, 0]),
                           (rand(4, 2, 3), [3, 3, 1, 1, 2, 2, 0, 0,
@@ -466,6 +479,15 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
                 out2 = test_out[0][0]
                 assert out1 is out2
 
+            # test the grad
+            gn = theano.grad(t.sum(), n)
+            g = self.function([], gn, op=self.adv_incsub1)
+            utt.verify_grad(lambda m: m[[1, 3]],
+                            [numpy.random.rand(5, 5).astype(self.dtype)])
+            g_0 = g()
+            utt.verify_grad(lambda m: m[idx],
+                            [data])
+
     def test_err_invalid_list(self):
         n = self.shared(numpy.asarray(5, dtype=self.dtype))
         self.assertRaises(TypeError, n.__getitem__, [0, 0])
@@ -482,13 +504,15 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         self.assertTrue(isinstance(t.owner.op, tensor.AdvancedSubtensor1))
 
         f = self.function([l], t, op=self.adv_sub1)
-        topo = f.maker.fgraph.toposort()
-        topo_ = [node for node in topo if not isinstance(node.op,
-             self.ignore_topo)]
-        assert len(topo_) == 1
-        self.assertTrue(isinstance(topo_[0].op, self.adv_sub1))
+
+        # the grad
+        g = self.function([l],
+                          inc_subtensor(t, numpy.asarray([[1.]], self.dtype)),
+                          op=self.adv_incsub1)
+
         for shp in [[0, 4], [0, -3], [-10]]:
             self.assertRaises(IndexError, f, shp)
+            self.assertRaises(IndexError, g, shp)
 
     def test_adv_sub1_broadcast(self):
         ones = numpy.ones((1, 3), dtype=self.dtype)
@@ -500,7 +524,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         f = self.function([idx], t, op=self.adv_sub1)
         topo = f.maker.fgraph.toposort()
         topo_ = [node for node in topo if not isinstance(node.op,
-             self.ignore_topo)]
+                                                         self.ignore_topo)]
         assert len(topo_) == 1
         self.assertTrue(isinstance(topo_[0].op, self.adv_sub1))
         f_0 = f([0])
@@ -547,7 +571,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         f = self.function([idx], t, op=self.adv_sub1)
         topo = f.maker.fgraph.toposort()
         topo_ = [node for node in topo if not isinstance(node.op,
-             self.ignore_topo)]
+                                                         self.ignore_topo)]
         assert len(topo_) == 1
         self.assertTrue(isinstance(topo_[0].op, self.adv_sub1))
         f_0 = f([0])
@@ -914,6 +938,8 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
                     data_num_init = data_num_init.reshape(data_shape)
                     inc_shapes = [data_shape[i:]
                                   for i in xrange(0, len(data_shape) + 1)]
+                    # Test broadcasting of y.
+                    inc_shapes += [(1,) + inc_shapes[-1][1:]]
                     for inc_shape in inc_shapes:
                         inc_n_dims = len(inc_shape)
                         # We copy the numeric value to be 100% sure there is no
@@ -928,6 +954,11 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
                         # Symbolic variable with rows to be incremented.
                         idx_var = theano.tensor.vector(dtype='int64')
                         n_to_inc = rng.randint(data_shape[0])
+                        if (n_to_inc == 1 and
+                                len(inc_shape) > 0 and
+                                inc_shape[0] == 1 and
+                                data_shape[0] > 1):
+                            n_to_inc = 2
                         # Corresponding numeric variable.
                         idx_num = rng.randint(0, data_shape[0], n_to_inc)
                         idx_num = idx_num.astype('int64')
@@ -939,7 +970,8 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
                         # `data_shape`: what we actually want is the first
                         # shape element to be equal to the number of rows to
                         # increment.
-                        if len(inc_shape) == len(data_shape):
+                        if len(inc_shape) == len(data_shape) and (
+                                len(inc_shapes) == 0 or inc_shape[0] != 1):
                             inc_shape = (n_to_inc,) + inc_shape[1:]
                         inc_size = numpy.product(inc_shape)
                         # Corresponding numeric variable.
@@ -958,11 +990,19 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
                         data_copy = data_num.copy()
                         for j, idx in enumerate(idx_num):
                             if len(inc_shape) == len(data_shape):
-                                # Special case where there is no broadcasting.
-                                if set_instead_of_inc:
-                                    data_copy[idx] = inc_num[j]
+                                if inc_shape[0] == 1:
+                                    # Allow broadcasting of y[0]
+                                    inc_num0 = inc_num[0]
+                                    if set_instead_of_inc:
+                                        data_copy[idx] = inc_num0
+                                    else:
+                                        data_copy[idx] += inc_num0
                                 else:
-                                    data_copy[idx] += inc_num[j]
+                                    # Special case where there is no broadcasting.
+                                    if set_instead_of_inc:
+                                        data_copy[idx] = inc_num[j]
+                                    else:
+                                        data_copy[idx] += inc_num[j]
                             else:
                                 if set_instead_of_inc:
                                     data_copy[idx] = inc_num

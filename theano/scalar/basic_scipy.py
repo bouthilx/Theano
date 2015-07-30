@@ -85,6 +85,41 @@ class Erfc(UnaryScalarOp):
 erfc = Erfc(upgrade_to_float_no_complex, name='erfc')
 
 
+class Erfcx(UnaryScalarOp):
+    """
+    Implements the scaled complementary error function exp(x**2)*erfc(x) in a numerically stable way for large x. This
+    is useful for calculating things like log(erfc(x)) = log(erfcx(x)) - x ** 2 without causing underflow. Should only
+    be used if x is known to be large and positive, as using erfcx(x) for large negative x may instead introduce
+    overflow problems.
+
+    Note: This op can still be executed on GPU, despite not having c_code.  When
+    running on GPU, sandbox.cuda.opt.local_gpu_elemwise_[0,1] replaces this op
+    with sandbox.cuda.elemwise.ErfcxGPU.
+    """
+    def impl(self, x):
+        if imported_scipy_special:
+            return scipy.special.erfcx(x)
+        else:
+            super(Erfcx, self).impl(x)
+
+    def grad(self, inp, grads):
+        x, = inp
+        gz, = grads
+        if x.type in complex_types:
+            raise NotImplementedError()
+        if self(x).type in discrete_types:
+            if x.type in discrete_types:
+                return [x.zeros_like(dtype=theano.config.floatX)]
+            else:
+                return [x.zeros_like()]
+
+        cst = numpy.asarray(2. / numpy.sqrt(numpy.pi),
+                            dtype=upcast(x.type.dtype, gz.type.dtype))
+        return gz * (-cst + (2. * x) * erfcx(x)),
+
+erfcx = Erfcx(upgrade_to_float_no_complex, name='erfcx')
+
+
 class Erfinv(UnaryScalarOp):
     """
     Implements the inverse error function.
@@ -171,7 +206,9 @@ class Gamma(UnaryScalarOp):
         else:
             super(Gamma, self).impl(x)
 
-    def grad(self, (x, ), (gz, )):
+    def grad(self, inputs, gout):
+        (x,) = inputs
+        (gz,) = gout
         if x.type in complex_types:
             raise NotImplementedError()
         if self(x).type in discrete_types:
@@ -182,7 +219,9 @@ class Gamma(UnaryScalarOp):
 
         return gz * gamma(x) * psi(x),
 
-    def c_code(self, node, name, (x, ), (z, ), sub):
+    def c_code(self, node, name, inputs, outputs, sub):
+        (x,) = inputs
+        (z,) = outputs
         if node.inputs[0].type in float_types:
             return """%(z)s = tgamma(%(x)s);""" % locals()
         raise NotImplementedError('only floating point is implemented')
@@ -257,51 +296,51 @@ class Psi(UnaryScalarOp):
 
     def c_support_code(self):
         return (
-"""
-// For GPU support
-#ifdef __CUDACC__
-#define DEVICE __device__
-#else
-#define DEVICE
-#endif
+            """
+            // For GPU support
+            #ifdef __CUDACC__
+            #define DEVICE __device__
+            #else
+            #define DEVICE
+            #endif
 
-#ifndef _PSIFUNCDEFINED
-#define _PSIFUNCDEFINED
-DEVICE double _psi(double x){
+            #ifndef _PSIFUNCDEFINED
+            #define _PSIFUNCDEFINED
+            DEVICE double _psi(double x){
 
-    /*taken from
-    Bernardo, J. M. (1976). Algorithm AS 103:
-    Psi (Digamma) Function. Applied Statistics. 25 (3), 315-317.
-    http://www.uv.es/~bernardo/1976AppStatist.pdf */
+            /*taken from
+            Bernardo, J. M. (1976). Algorithm AS 103:
+            Psi (Digamma) Function. Applied Statistics. 25 (3), 315-317.
+            http://www.uv.es/~bernardo/1976AppStatist.pdf */
 
-    double y, R, psi_ = 0;
-    double S  = 1.0e-5;
-    double C = 8.5;
-    double S3 = 8.333333333e-2;
-    double S4 = 8.333333333e-3;
-    double S5 = 3.968253968e-3;
-    double D1 = -0.5772156649;
+            double y, R, psi_ = 0;
+            double S  = 1.0e-5;
+            double C = 8.5;
+            double S3 = 8.333333333e-2;
+            double S4 = 8.333333333e-3;
+            double S5 = 3.968253968e-3;
+            double D1 = -0.5772156649;
 
-    y = x;
+            y = x;
 
-    if (y <= 0.0)
-        return psi_;
+            if (y <= 0.0)
+               return psi_;
 
-    if (y <= S )
-        return D1 - 1.0/y;
+            if (y <= S )
+                return D1 - 1.0/y;
 
-    while (y < C){
-        psi_ = psi_ - 1.0 / y;
-        y = y + 1;}
+            while (y < C){
+                psi_ = psi_ - 1.0 / y;
+                y = y + 1;}
 
-    R = 1.0 / y;
-    psi_ = psi_ + log(y) - .5 * R ;
-    R= R*R;
-    psi_ = psi_ - R * (S3 - R * (S4 - R * S5));
+            R = 1.0 / y;
+            psi_ = psi_ + log(y) - .5 * R ;
+            R= R*R;
+            psi_ = psi_ - R * (S3 - R * (S4 - R * S5));
 
-    return psi_;}
-    #endif
-        """ )
+            return psi_;}
+            #endif
+            """)
 
     def c_code(self, node, name, inp, out, sub):
         x, = inp

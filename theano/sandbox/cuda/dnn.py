@@ -17,7 +17,7 @@ from theano.sandbox.cuda import GpuOp
 from theano.sandbox.cuda.basic_ops import (as_cuda_ndarray_variable,
                                            host_from_gpu,
                                            gpu_contiguous, HostFromGpu,
-                                           gpu_alloc_empty)
+                                           gpu_alloc_empty, GpuAllocEmpty)
 from theano.sandbox.cuda.blas import (GpuConv, GpuDownsampleFactorMax,
                                       GpuDownsampleFactorMaxGrad)
 from theano.sandbox.cuda.nnet import GpuSoftmax
@@ -231,6 +231,9 @@ class GpuDnnConvDesc(GpuOp):
     def c_compiler(self):
         return NVCC_compiler
 
+    def do_constant_folding(self, node):
+        return False
+
     def __init__(self, border_mode, subsample=(1, 1), conv_mode='conv'):
         if isinstance(border_mode, int):
             border_mode = (border_mode, border_mode)
@@ -256,7 +259,8 @@ class GpuDnnConvDesc(GpuOp):
             raise TypeError('kern must be 1D shape tensor')
 
         return Apply(self, [img_shape, kern_shape],
-                     [CDataType("cudnnConvolutionDescriptor_t")()])
+                     [CDataType("cudnnConvolutionDescriptor_t",
+                                freefunc="cudnnDestroyConvolutionDescriptor")()])
 
     def c_code(self, node, name, inputs, outputs, sub):
         img_shape, kern_shape = inputs
@@ -377,6 +381,8 @@ class GpuDnnConv(DnnBase, COp):
     :param descr: the convolution descriptor
     """
     __props__ = ('workmem', 'inplace')
+    __input_name__ = ('image', 'kernel', 'output',
+                      'descriptor', 'alpha', 'beta')
 
     def __init__(self, workmem=None, inplace=False):
         """
@@ -501,6 +507,7 @@ class GpuDnnConvGradW(DnnBase, COp):
 
     """
     __props__ = ('inplace',)
+    __input_name__ = ('image', 'grad', 'output', 'descriptor', 'alpha', 'beta')
 
     def __init__(self, inplace=False):
         COp.__init__(self, ["dnn_base.c", "dnn_conv_base.c", "dnn_gw.c"],
@@ -573,6 +580,8 @@ class GpuDnnConvGradI(DnnBase, COp):
 
     """
     __props__ = ('inplace',)
+    __input_name__ = ('kernel', 'grad', 'output',
+                      'descriptor', 'alpha', 'beta')
 
     def __init__(self, inplace=False):
         COp.__init__(self, ["dnn_base.c", "dnn_conv_base.c", "dnn_gi.c"],
@@ -721,7 +730,8 @@ class GpuDnnPoolDesc(GpuOp):
 
     :param ws: windows size
     :param stride: (dx, dy)
-    :param mode: 'max' or 'average'
+    :param mode: 'max', 'average_inc_pad' or 'average_exc_pad'
+        The old deprecated name 'average' correspond to 'average_inc_pad'
     :param pad: (padX, padY) padding information.
         padX is the size of the left and right borders,
         padY is the size of the top and bottom borders.
@@ -744,7 +754,9 @@ class GpuDnnPoolDesc(GpuOp):
         return False
 
     def __init__(self, ws=(1, 1), stride=(1, 1), mode='max', pad=(0, 0)):
-        assert mode in ('max', 'average')
+        if mode == 'average':
+            mode = 'average_inc_pad'
+        assert mode in ('max', 'average_inc_pad', 'average_exc_pad')
         self.mode = mode
         assert len(ws) == 2
         self.ws = ws
@@ -765,15 +777,20 @@ class GpuDnnPoolDesc(GpuOp):
             raise RuntimeError("CuDNN pooling with padding requires CuDNN v2")
 
         return Apply(self, [],
-                     [CDataType("cudnnPoolingDescriptor_t")()])
+                     [CDataType("cudnnPoolingDescriptor_t",
+                                freefunc="cudnnDestroyPoolingDescriptor")()])
 
     def c_code(self, node, name, inputs, outputs, sub):
         desc, = outputs
 
         if self.mode == 'max':
             mode_flag = 'CUDNN_POOLING_MAX'
-        elif self.mode == "average":
+        elif self.mode == "average_inc_pad":
             mode_flag = 'CUDNN_POOLING_AVERAGE_COUNT_INCLUDE_PADDING'
+        elif self.mode == "average_exc_pad":
+            mode_flag = 'CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING'
+            if version() == -1:
+                raise Exception("cudnn v1 do not support average_exc_pad")
         else:
             raise NotImplementedError("Unsupported pooling model.")
 
@@ -1194,7 +1211,8 @@ def dnn_pool(img, ws, stride=(1, 1), mode='max', pad=(0, 0)):
     :param img: images to do the pooling over
     :param ws: subsampling window size
     :param stride: subsampling stride (default: (1, 1))
-    :param mode: one of 'max', 'average' (default: 'max')
+    :param mode: one of 'max', 'average_inc_pad' or 'average_exc_pad
+        (default: 'max')
     :param pad: (padX, padY) padding information.
         padX is the size of the left and right borders,
         padY is the size of the top and bottom borders.
@@ -1436,7 +1454,7 @@ class GpuDnnSoftmaxGrad(GpuDnnSoftmaxBase):
         sm = as_cuda_ndarray_variable(sm)
         assert dy.ndim == 4
         assert sm.ndim == 4
-        return Apply(self, [dy, sm], [sm.type.make_variable()])
+        return Apply(self, [dy, sm], [sm.type()])
 
     def method(self):
         return """
@@ -1533,19 +1551,37 @@ if True:
     def local_dnn_conv_inplace(node):
         if type(node.op) != GpuDnnConv or node.op.inplace:
             return
-        return [GpuDnnConv(workmem=node.op.workmem, inplace=True)(*node.inputs)]
+        inputs = list(node.inputs)
+        dest = inputs[2]
+        if (dest.owner and
+                isinstance(dest.owner.op, GpuAllocEmpty) and
+                len(dest.clients) > 1):
+            inputs[2] = gpu_alloc_empty(*dest.owner.inputs)
+        return [GpuDnnConv(workmem=node.op.workmem, inplace=True)(*inputs)]
 
     @local_optimizer([GpuDnnConvGradW], inplace=True)
     def local_dnn_convgw_inplace(node):
         if type(node.op) != GpuDnnConvGradW or node.op.inplace:
             return
-        return [GpuDnnConvGradW(inplace=True)(*node.inputs)]
+        inputs = list(node.inputs)
+        dest = inputs[2]
+        if (dest.owner and
+                isinstance(dest.owner.op, GpuAllocEmpty) and
+                len(dest.clients) > 1):
+            inputs[2] = gpu_alloc_empty(*dest.owner.inputs)
+        return [GpuDnnConvGradW(inplace=True)(*inputs)]
 
     @local_optimizer([GpuDnnConvGradI], inplace=True)
     def local_dnn_convgi_inplace(node):
         if type(node.op) != GpuDnnConvGradI or node.op.inplace:
             return
-        return [GpuDnnConvGradI(inplace=True)(*node.inputs)]
+        inputs = list(node.inputs)
+        dest = inputs[2]
+        if (dest.owner and
+                isinstance(dest.owner.op, GpuAllocEmpty) and
+                len(dest.clients) > 1):
+            inputs[2] = gpu_alloc_empty(*dest.owner.inputs)
+        return [GpuDnnConvGradI(inplace=True)(*inputs)]
 
     optdb.register('local_dnn_conv_inplace',
                    tensor.opt.in2out(local_dnn_conv_inplace,
@@ -1607,7 +1643,7 @@ if True:
 
     @register_opt('cudnn')
     @local_optimizer([DownsampleFactorMax])
-    def local_pool_dnn_stride(node):
+    def local_pool_dnn_alternative(node):
         if not dnn_available():
             return
         if isinstance(node.op, DownsampleFactorMax):
@@ -1617,9 +1653,10 @@ if True:
             ds = node.op.ds
             stride = node.op.st
             pad = node.op.padding
+            mode = node.op.mode
             if (img.owner and isinstance(img.owner.op, HostFromGpu)):
                 ret = dnn_pool(gpu_contiguous(img.owner.inputs[0]),
-                               ds, stride=stride, pad=pad)
+                               ds, stride=stride, pad=pad, mode=mode)
                 return [host_from_gpu(ret)]
 
     @register_opt('cudnn')
@@ -1645,18 +1682,19 @@ if True:
         if not dnn_available():
             return
         if isinstance(node.op, DownsampleFactorMaxGrad):
+            if not node.op.ignore_border:
+                return
             inp, out, inp_grad = node.inputs
             ds = node.op.ds
             st = node.op.st
             pad = node.op.padding
+            mode = node.op.mode
 
             if ((inp.owner and isinstance(inp.owner.op, HostFromGpu)) or
                 (out.owner and isinstance(out.owner.op, HostFromGpu)) or
                 (inp_grad.owner and isinstance(inp_grad.owner.op,
                                                HostFromGpu))):
-                desc = GpuDnnPoolDesc(ws=ds, stride=st, mode="max", pad=pad)()
-                if not node.op.ignore_border:
-                    return
+                desc = GpuDnnPoolDesc(ws=ds, stride=st, mode=mode, pad=pad)()
                 ret = GpuDnnPoolGrad()(gpu_contiguous(inp),
                                        gpu_contiguous(out),
                                        gpu_contiguous(inp_grad),
@@ -1690,17 +1728,19 @@ if True:
     @register_opt('cudnn')
     @local_optimizer([SoftmaxGrad])
     def local_softmax_dnn_grad(node):
-        if (
-            isinstance(node.op, SoftmaxGrad)
-            and (isinstance(node.inputs[0].owner.op, HostFromGpu)
-                 or isinstance(node.inputs[1].owner.op, HostFromGpu))
-        ):
+        if (isinstance(node.op, SoftmaxGrad) and
+            ((node.inputs[0].owner and
+              isinstance(node.inputs[0].owner.op, HostFromGpu))
+             or (node.inputs[1].owner and
+                 isinstance(node.inputs[1].owner.op, HostFromGpu)))):
             if not dnn_available():
                 return
             ins = []
             for n in node.inputs:
                 if isinstance(n.owner.op, HostFromGpu):
                     n = n.owner.inputs[0]
+                if n.ndim != 2:
+                    return
                 ins.append(n.dimshuffle(0, 1, 'x', 'x'))
 
             out = GpuDnnSoftmaxGrad(
