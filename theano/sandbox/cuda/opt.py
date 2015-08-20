@@ -18,10 +18,9 @@ import theano.ifelse
 from six.moves import reduce, xrange
 from theano.compile import optdb
 from theano.gof import (local_optimizer, EquilibriumDB, ProxyDB,
-                        Optimizer, toolbox)
+                        Optimizer, TopoOptimizer, toolbox)
 from theano.gof.opt import LocalMetaOptimizer
 from theano.sandbox.cuda import as_cuda_ndarray_variable
-from theano.sandbox.opt import register_meta_opt
 from theano.sandbox.cuda.basic_ops import (
     gpu_eye, gpu_contiguous,
     gpu_from_host, host_from_gpu, GpuFromHost, HostFromGpu,
@@ -47,12 +46,17 @@ from theano.sandbox.cuda.blas import (GpuDownsampleFactorMax,
     GpuDownsampleFactorMaxGrad, GpuDownsampleFactorMaxGradGrad)
 
 from theano.sandbox.blocksparse import SparseBlockGemv, SparseBlockOuter
-from theano.sandbox.cuda.blocksparse import GpuSparseBlockGemv, GpuSparseBlockOuter
+from theano.sandbox.cuda.blocksparse import (
+    GpuSparseBlockGemv,
+    GpuSparseBlockOuter,
+    gpu_sparse_block_gemv_inplace,
+    gpu_sparse_block_outer_inplace)
+
 
 from theano.sandbox.cuda.nnet import (
-        GpuCrossentropySoftmaxArgmax1HotWithBias,
-        GpuCrossentropySoftmax1HotWithBiasDx,
-        GpuSoftmax, GpuSoftmaxWithBias)
+    GpuCrossentropySoftmaxArgmax1HotWithBias,
+    GpuCrossentropySoftmax1HotWithBiasDx,
+    GpuSoftmax, GpuSoftmaxWithBias)
 
 from theano.sandbox.cuda.elemwise import SupportCodeError
 from theano.scalar.basic_scipy import Erfinv
@@ -2465,8 +2469,7 @@ def _clear_host_from_gpu(inputs):
     return clean_inputs
 
 
-@register_meta_opt(SparseBlockGemv, ["gpu_opt", "gpu_local_optimizations"],
-                   0., 'fast_run', 'fast_compile', 'gpu')
+@register_opt()
 @local_optimizer([SparseBlockGemv, GpuFromHost])
 def gpu_sparse_block_gemv_opt(node):
     """
@@ -2493,8 +2496,7 @@ def gpu_sparse_block_gemv_opt(node):
         return [GpuSparseBlockGemv(meta_node.op.inplace)(*inputs)]
 
 
-@register_meta_opt(SparseBlockOuter, ["gpu_opt", "gpu_local_optimizations"],
-                   0., 'fast_run', 'fast_compile', 'gpu')
+@register_opt()
 @local_optimizer([SparseBlockOuter, GpuFromHost])
 def gpu_sparse_block_outer_opt(node):
     """
@@ -2520,6 +2522,38 @@ def gpu_sparse_block_outer_opt(node):
         inputs = _clear_host_from_gpu(meta_node.inputs)
 
         return [GpuSparseBlockOuter(meta_node.op.inplace)(*inputs)]
+
+
+@local_optimizer([GpuSparseBlockGemv], inplace=True)
+def local_inplace_gpu_sparse_block_gemv(node):
+    """
+        GpuSparseBlockGemv(inplace=False) -> GpuSparseBlockGemv(inplace=True)
+    """
+    if isinstance(node.op, GpuSparseBlockGemv) and not node.op.inplace:
+        new_node = gpu_sparse_block_gemv_inplace(*node.inputs)
+        return [new_node]
+    return False
+compile.optdb.register('local_inplace_gpu_sparse_block_gemv',
+                       TopoOptimizer(
+                           local_inplace_gpu_sparse_block_gemv,
+                           failure_callback=TopoOptimizer.warn_inplace),
+                       60, 'fast_run', 'inplace', 'gpu')  # DEBUG
+
+
+@local_optimizer([GpuSparseBlockOuter], inplace=True)
+def local_inplace_gpu_sparse_block_outer(node):
+    """
+        GpuSparseBlockOuter(inplace=False) -> GpuSparseBlockOuter(inplace=True)
+    """
+    if isinstance(node.op, GpuSparseBlockOuter) and not node.op.inplace:
+        new_node = gpu_sparse_block_outer_inplace(*node.inputs)
+        return [new_node]
+    return False
+compile.optdb.register('local_inplace_gpu_sparse_block_outer',
+                       TopoOptimizer(
+                           local_inplace_gpu_sparse_block_outer,
+                           failure_callback=TopoOptimizer.warn_inplace),
+                       60, 'fast_run', 'inplace', 'gpu')  # DEBUG
 
 
 import theano.sandbox.cuda.extra_ops
