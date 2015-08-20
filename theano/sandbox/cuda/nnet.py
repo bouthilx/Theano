@@ -13,7 +13,9 @@ from theano.sandbox.cuda.kernel_codegen import (nvcc_kernel,
 class GpuCrossentropySoftmaxArgmax1HotWithBias(GpuOp):
     """
     Implement CrossentropySoftmaxArgmax1HotWithBias on the gpu.
+
     """
+
     nin = 3
     nout = 3
 
@@ -225,7 +227,9 @@ gpu_crossentropy_softmax_argmax_1hot_with_bias = \
 class GpuCrossentropySoftmax1HotWithBiasDx(GpuOp):
     """
     Implement CrossentropySoftmax1HotWithBiasDx on the gpu.
+
     """
+
     nin = 3
     nout = 1
     """Gradient wrt x of the CrossentropySoftmax1Hot Op"""
@@ -395,7 +399,9 @@ gpu_crossentropy_softmax_1hot_with_bias_dx = \
 class GpuSoftmax(GpuOp):
     """
     Implement Softmax on the gpu.
+
     """
+
     def __eq__(self, other):
         return type(self) == type(other)
 
@@ -557,7 +563,9 @@ gpu_softmax = GpuSoftmax()
 class GpuSoftmaxWithBias(GpuOp):
     """
     Implement SoftmaxWithBias on the gpu.
+
     """
+
     nin = 2
     nout = 1
 
