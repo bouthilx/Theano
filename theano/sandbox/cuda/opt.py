@@ -1124,9 +1124,14 @@ def local_gpu_advanced_incsubtensor1(node):
                 y.ndim != 2 or
                 config.deterministic):
 
+                _logger.warn("Using slow version of GpuAdvancedIncSubtensor")
+
                 gpu_op = GpuAdvancedIncSubtensor1(
                     set_instead_of_inc=set_instead_of_inc)
             else:
+
+                _logger.warn("Using fast version of GpuAdvancedIncSubtensor")
+
                 gpu_op = GpuAdvancedIncSubtensor1_dev20(
                     set_instead_of_inc=set_instead_of_inc)
             return [gpu_op(as_cuda_ndarray_variable(x),
@@ -1167,9 +1172,15 @@ def local_gpu_advanced_incsubtensor1(node):
                 x.ndim != 2 or
                 y.ndim != 2 or
                 config.deterministic):
+
+                _logger.warn("Using slow version of GpuAdvancedIncSubtensor")
+
                 gpu_op = GpuAdvancedIncSubtensor1(
                     set_instead_of_inc=set_instead_of_inc)
             else:
+
+                _logger.warn("Using fast version of GpuAdvancedIncSubtensor")
+
                 gpu_op = GpuAdvancedIncSubtensor1_dev20(
                     set_instead_of_inc=set_instead_of_inc)
             return [host_from_gpu(gpu_op(gpu_x, gpu_y, *coords))]

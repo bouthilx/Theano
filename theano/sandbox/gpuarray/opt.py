@@ -641,9 +641,15 @@ def local_gpua_advanced_incsubtensor(node, context_name):
 
     if (compute_capability < 2 or x.ndim != 2 or y.ndim != 2 or
             config.deterministic):
+
+        _logger.warn("Using slow version of GpuAdvancedIncSubtensor")
+
         return GpuAdvancedIncSubtensor1(
             set_instead_of_inc=set_instead_of_inc)
     else:
+
+        _logger.warn("Using fast version of GpuAdvancedIncSubtensor")
+
         return GpuAdvancedIncSubtensor1_dev20(
             set_instead_of_inc=set_instead_of_inc)
 
